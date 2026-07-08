@@ -41,13 +41,13 @@ npm run dev
 4. Health check:
 
 ```bash
-curl http://localhost:4010/health
+curl http://localhost:4011/health
 ```
 
 5. Example MCP calls:
 
 ```bash
-curl -s -X POST http://localhost:4010/mcp \
+curl -s -X POST http://localhost:4011/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "Authorization: Bearer $ACCOUNTING_MCP_API_KEY" \
@@ -71,7 +71,7 @@ curl -s -X POST http://localhost:4010/mcp \
 
 ## MCP Endpoint
 
-- URL: `http://localhost:4010/mcp`
+- URL: `http://localhost:4011/mcp`
 - Transport: `streamable-http`
 - Auth: `Authorization: Bearer <ACCOUNTING_MCP_API_KEY>`
 
@@ -156,7 +156,7 @@ Add an MCP server entry similar to this in `librechat.yaml`:
 mcpServers:
   accounting:
     type: streamable-http
-    url: http://127.0.0.1:4010/mcp
+    url: http://127.0.0.1:4011/mcp
     apiKey:
       source: admin
       authorization_type: bearer
@@ -169,7 +169,7 @@ If LibreChat runs in Docker and this server runs on the host machine, use a reac
 mcpServers:
   accounting:
     type: streamable-http
-    url: http://host.docker.internal:4010/mcp
+    url: http://host.docker.internal:4011/mcp
     apiKey:
       source: admin
       authorization_type: bearer
@@ -190,7 +190,7 @@ Run:
 
 ```bash
 docker run --rm \
-  -p 4010:4010 \
+  -p 4011:4011 \
   -e ACCOUNTING_MCP_API_KEY=replace-with-a-long-random-token \
   -e DATABASE_URL=postgresql://postgres:password@host.docker.internal:5432/accounting \
   -e HOST=0.0.0.0 \
