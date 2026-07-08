@@ -18,6 +18,17 @@ const pool = createPool(config.databaseUrl);
 await initializeDatabase(pool);
 const repository = new ExpenseRepository(pool);
 const spreadsheetRepository = new UserSpreadsheetRepository(pool);
+
+// Heal spreadsheet creations that a previous crash or restart left half-done.
+// A stale `creating` row would otherwise keep every sync for that user stuck on
+// "creation already in progress" until it ages out of the stale window.
+const interruptedCreations = await spreadsheetRepository.resetInterruptedCreations();
+if (interruptedCreations > 0) {
+  console.warn(
+    `Reset ${interruptedCreations} interrupted Google Sheets creation(s) left over from a previous run.`,
+  );
+}
+
 const sheetsSync = config.sheets.enabled
   ? new GoogleSheetsSync(config.sheets, spreadsheetRepository)
   : null;

@@ -107,6 +107,38 @@ export class UserSpreadsheetRepository {
     }
   }
 
+  /**
+   * Reset spreadsheet creations that were interrupted before they finished.
+   *
+   * A row only stays in the `creating` state while a request is actively
+   * building that user's spreadsheet. If the process is killed or restarted
+   * mid-creation, the row is orphaned: `claimCreation` keeps reporting
+   * `in_progress` for it until the stale window elapses, which blocks every
+   * sync for that user. Because no creation can be in flight while the server
+   * is still starting up, any `creating` row found here is guaranteed to be
+   * orphaned, so it is moved to `failed` and the next sync retries cleanly.
+   *
+   * Call this once during startup, after the database schema is initialized.
+   *
+   * @returns the number of interrupted rows that were reset
+   */
+  async resetInterruptedCreations(): Promise<number> {
+    const now = new Date().toISOString();
+    const result = await this.pool.query(
+      `
+      UPDATE mcp_user_spreadsheets
+      SET
+        status = 'failed',
+        last_error = $1,
+        updated_at = $2
+      WHERE status = 'creating'
+      `,
+      ['Interrupted spreadsheet creation reset on server startup', now],
+    );
+
+    return result.rowCount ?? 0;
+  }
+
   private async claimCreation(user: McpUserIdentity): Promise<CreationClaim> {
     const client = await this.pool.connect();
 
