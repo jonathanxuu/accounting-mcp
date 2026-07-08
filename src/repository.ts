@@ -9,6 +9,7 @@ import type {
 
 type ExpenseRow = {
   id: string | number;
+  mcp_user_key: string | null;
   claimant: string;
   amount_cents: string | number;
   currency: string;
@@ -38,6 +39,7 @@ function toAmountCents(amount: number): number {
 function fromExpenseRow(row: ExpenseRow) {
   return {
     id: Number(row.id),
+    mcpUserKey: row.mcp_user_key,
     claimant: row.claimant,
     amount: Number(row.amount_cents) / 100,
     amountCents: Number(row.amount_cents),
@@ -71,6 +73,7 @@ function appendFilter(
 }
 
 function buildWhereClause(filters: {
+  mcpUserKey: string;
   claimant?: string;
   category?: string;
   status?: string;
@@ -78,8 +81,8 @@ function buildWhereClause(filters: {
   startDate?: string;
   endDate?: string;
 }) {
-  const conditions: string[] = [];
-  const params: unknown[] = [];
+  const conditions: string[] = ['mcp_user_key = $1'];
+  const params: unknown[] = [filters.mcpUserKey];
 
   appendFilter(conditions, params, 'claimant', filters.claimant);
   appendFilter(conditions, params, 'category', filters.category);
@@ -136,12 +139,13 @@ function resolveSortColumn(sortBy: ListExpensesInput['sortBy']): string {
 export class ExpenseRepository {
   constructor(private readonly pool: Pool) {}
 
-  async addExpense(input: AddExpenseInput) {
+  async addExpense(input: AddExpenseInput, mcpUserKey: string) {
     const now = new Date().toISOString();
     const amountCents = toAmountCents(input.amount);
     const result = await this.pool.query<ExpenseRow>(
       `
       INSERT INTO expenses (
+        mcp_user_key,
         claimant,
         amount_cents,
         currency,
@@ -153,10 +157,11 @@ export class ExpenseRepository {
         notes,
         created_at,
         updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       RETURNING *
       `,
       [
+        mcpUserKey,
         input.claimant,
         amountCents,
         input.currency,
@@ -174,10 +179,11 @@ export class ExpenseRepository {
     return fromExpenseRow(result.rows[0]);
   }
 
-  async cancelExpense(input: CancelExpenseInput) {
-    const existingResult = await this.pool.query<ExpenseRow>('SELECT * FROM expenses WHERE id = $1', [
-      input.id,
-    ]);
+  async cancelExpense(input: CancelExpenseInput, mcpUserKey: string) {
+    const existingResult = await this.pool.query<ExpenseRow>(
+      'SELECT * FROM expenses WHERE id = $1 AND mcp_user_key = $2',
+      [input.id, mcpUserKey],
+    );
     const existing = existingResult.rows[0];
 
     if (!existing) {
@@ -210,16 +216,17 @@ export class ExpenseRepository {
         cancellation_reason = $3,
         updated_at = $4
       WHERE id = $5
+        AND mcp_user_key = $6
       RETURNING *
       `,
-      [now, input.cancelledBy ?? input.claimant, input.reason, now, input.id],
+      [now, input.cancelledBy ?? input.claimant, input.reason, now, input.id, mcpUserKey],
     );
 
     return fromExpenseRow(updatedResult.rows[0]);
   }
 
-  async listExpenses(input: ListExpensesInput) {
-    const { whereClause, params } = buildWhereClause(input);
+  async listExpenses(input: ListExpensesInput, mcpUserKey: string) {
+    const { whereClause, params } = buildWhereClause({ ...input, mcpUserKey });
     const sortColumn = resolveSortColumn(input.sortBy);
     const sortOrder = input.sortOrder.toUpperCase();
     const paginationParams = [...params, input.limit, input.offset];
@@ -251,8 +258,8 @@ export class ExpenseRepository {
     };
   }
 
-  async summarize(input: SummaryInput) {
-    const { whereClause, params } = buildWhereClause(input);
+  async summarize(input: SummaryInput, mcpUserKey: string) {
+    const { whereClause, params } = buildWhereClause({ ...input, mcpUserKey });
     const groupExpression = resolveGroupExpression(input.groupBy);
     const rowsResult = await this.pool.query<SummaryRow>(
       `

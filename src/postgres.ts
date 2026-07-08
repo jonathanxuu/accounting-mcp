@@ -35,5 +35,29 @@ export async function initializeDatabase(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses (category);
     CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses (status);
     CREATE INDEX IF NOT EXISTS idx_expenses_currency ON expenses (currency);
+
+    ALTER TABLE expenses
+      ADD COLUMN IF NOT EXISTS mcp_user_key TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_expenses_mcp_user_key ON expenses (mcp_user_key);
+
+    CREATE TABLE IF NOT EXISTS mcp_user_spreadsheets (
+      user_key TEXT PRIMARY KEY,
+      user_label TEXT NOT NULL,
+      spreadsheet_id TEXT,
+      spreadsheet_url TEXT,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ready',
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    ALTER TABLE mcp_user_spreadsheets
+      ALTER COLUMN spreadsheet_id DROP NOT NULL;
+
+    ALTER TABLE mcp_user_spreadsheets
+      ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready',
+      ADD COLUMN IF NOT EXISTS last_error TEXT;
   `);
 }

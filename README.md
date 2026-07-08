@@ -9,7 +9,7 @@ An HTTP MCP server for reimbursement collection and reporting with PostgreSQL/Cl
 - `cancel_expense`: let the claimant cancel an incorrect reimbursement record
 - `query_expense_summary`: aggregate totals by claimant, category, status, currency, day, or month
 - `get_accounting_usage_guide`: short usage guide for the agent
-- Optional real-time sync of expense detail rows into Google Sheets
+- Optional real-time sync of expense detail rows into MCP caller-specific Google Sheets files
 
 ## Stack
 
@@ -101,24 +101,52 @@ The app auto-creates the `expenses` table and indexes at startup.
 
 ## Google Sheets Sync
 
-When `GOOGLE_SHEETS_SYNC_ENABLED=true`, each `add_expense` and `cancel_expense` call updates a Google Sheet in near real time.
+When `GOOGLE_SHEETS_SYNC_ENABLED=true`, each `add_expense` and `cancel_expense` call updates a Google Sheets file owned by the current MCP caller identity in near real time.
+
+For OAuth deployments, configure the MCP client to use Google OAuth directly. The MCP client sends the resulting Google access token as `Authorization: Bearer <token>` to this server. The server validates the token with Google, uses the Google user ID as the spreadsheet owner key, and uses the same access token to create or update that user's Sheets file.
+
+For API key deployments, the MCP caller is read from an HTTP header. By default, the server reads `X-Accounting-User`; override this with `ACCOUNTING_MCP_USER_HEADER`. The server requires a caller identity for all MCP tool calls so database records, summaries, cancellations, and Sheets files stay user-scoped.
+
+For example, with `GOOGLE_SHEETS_SHEET_NAME=Expenses` and `X-Accounting-User: alice@example.com`, the caller gets a spreadsheet file named `Expenses - alice@example.com`. If that user mapping does not exist yet, the service creates a new spreadsheet and stores the user-to-spreadsheet mapping in PostgreSQL. If a row with the same `expense_id` already exists in that user's file, the service updates that row instead of appending a duplicate.
 
 Required settings:
 
 ```text
+ACCOUNTING_MCP_AUTH_MODE=google_oauth
 GOOGLE_SHEETS_SYNC_ENABLED=true
-GOOGLE_SHEETS_SPREADSHEET_ID=your_spreadsheet_id
 GOOGLE_SHEETS_SHEET_NAME=Expenses
+GOOGLE_OAUTH_ALLOWED_DOMAINS=example.com
 ```
 
-Provide Google credentials with one of:
+`GOOGLE_SHEETS_SHEET_NAME` is used as the detail tab name inside each user spreadsheet and as the spreadsheet title prefix. `GOOGLE_SHEETS_SPREADSHEET_ID` is not required because spreadsheets are created per MCP caller.
+
+For the OAuth fields in an MCP connector UI, use:
+
+```text
+Client ID: your Google OAuth web client id
+Client Secret: your Google OAuth web client secret
+Auth URL: https://accounts.google.com/o/oauth2/v2/auth
+Token URL: https://oauth2.googleapis.com/token
+Scope: openid email profile https://www.googleapis.com/auth/spreadsheets
+```
+
+Add the connector's displayed Redirect URI to the Google OAuth client's authorized redirect URIs.
+
+For production, restrict which Google accounts may call the MCP server with one or both of:
+
+```text
+GOOGLE_OAUTH_ALLOWED_DOMAINS=example.com
+GOOGLE_OAUTH_ALLOWED_EMAILS=alice@example.com,bob@example.com
+```
+
+In `api_key` mode, provide service account Google credentials with one of:
 
 ```text
 GOOGLE_SERVICE_ACCOUNT_KEY_FILE=/absolute/path/to/service-account.json
 GOOGLE_SERVICE_ACCOUNT_KEY_JSON={"type":"service_account",...}
 ```
 
-Share the target spreadsheet with the service account email so it can write rows.
+In `google_oauth` mode, created spreadsheets are owned by the signed-in Google user. In `api_key` mode, created spreadsheets are owned by the configured service account.
 
 ## LibreChat Example
 
@@ -176,7 +204,7 @@ docker run --rm \
 - Use `list_expenses` to verify raw rows.
 - Use `cancel_expense` when a claimant needs to withdraw a mistaken record.
 - Use `query_expense_summary` for reporting.
-- When Sheets sync is enabled, let finance users use the spreadsheet as a live detail view rather than the source of truth.
+- When Sheets sync is enabled, let finance users use the MCP caller-specific spreadsheets as live detail views rather than the source of truth.
 
 ## Next Production Steps
 

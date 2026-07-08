@@ -1,7 +1,11 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 
 import { google } from 'googleapis';
 import type { sheets_v4 } from 'googleapis';
+
+import { UserSpreadsheetRepository } from './sheetMappings.js';
+import type { McpUserIdentity, NewUserSpreadsheet } from './sheetMappings.js';
 
 type ExpenseRecord = {
   id: number;
@@ -24,7 +28,7 @@ type ExpenseRecord = {
 
 type SheetsConfig = {
   enabled: boolean;
-  spreadsheetId?: string;
+  useUserGoogleAuth: boolean;
   sheetName: string;
   serviceAccountKeyFile?: string;
   serviceAccountKeyJson?: string;
@@ -49,6 +53,50 @@ const HEADER = [
   'updated_at',
 ];
 
+const INVALID_SHEET_TITLE_CHARS = /[\[\]:*?\/\\]/g;
+const MAX_SHEET_TITLE_LENGTH = 100;
+const MAX_SPREADSHEET_TITLE_LENGTH = 180;
+
+function sanitizeSheetTitle(value: string): string {
+  return value.replace(INVALID_SHEET_TITLE_CHARS, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function truncateTitle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return value.slice(0, maxLength).trim();
+}
+
+function identityHash(value: string): string {
+  return createHash('sha1').update(value).digest('hex').slice(0, 8);
+}
+
+function buildDetailSheetName(sheetName: string): string {
+  return truncateTitle(sanitizeSheetTitle(sheetName), MAX_SHEET_TITLE_LENGTH) || 'Expenses';
+}
+
+function buildUserSpreadsheetTitle(baseSheetName: string, user: McpUserIdentity): string {
+  const baseTitle = sanitizeSheetTitle(baseSheetName) || 'Expenses';
+  const userTitle = sanitizeSheetTitle(user.label) || sanitizeSheetTitle(user.key) || 'Unknown';
+  const title = `${baseTitle} - ${userTitle}`;
+  const hashSuffix = userTitle === user.label.trim() ? '' : `-${identityHash(user.key)}`;
+
+  return (
+    truncateTitle(`${title}${hashSuffix}`, MAX_SPREADSHEET_TITLE_LENGTH) ||
+    `Expenses - ${identityHash(user.key)}`
+  );
+}
+
+function a1Range(sheetName: string, range: string): string {
+  return `'${sheetName.replace(/'/g, "''")}'!${range}`;
+}
+
+function isDuplicateSheetTitleError(error: unknown): boolean {
+  return error instanceof Error && /already exists/i.test(error.message);
+}
+
 function toRow(expense: ExpenseRecord): string[] {
   return [
     String(expense.id),
@@ -72,22 +120,22 @@ function toRow(expense: ExpenseRecord): string[] {
 
 export class GoogleSheetsSync {
   private readonly enabled: boolean;
-  private readonly spreadsheetId?: string;
+  private readonly useUserGoogleAuth: boolean;
   private readonly sheetName: string;
   private readonly sheetsApiPromise: Promise<sheets_v4.Sheets> | null;
+  private readonly knownDetailSheets = new Set<string>();
 
-  constructor(config: SheetsConfig) {
+  constructor(
+    config: SheetsConfig,
+    private readonly spreadsheetRepository: UserSpreadsheetRepository,
+  ) {
     this.enabled = config.enabled;
-    this.spreadsheetId = config.spreadsheetId;
-    this.sheetName = config.sheetName;
+    this.useUserGoogleAuth = config.useUserGoogleAuth;
+    this.sheetName = buildDetailSheetName(config.sheetName);
 
-    if (!config.enabled) {
+    if (!config.enabled || config.useUserGoogleAuth) {
       this.sheetsApiPromise = null;
       return;
-    }
-
-    if (!config.spreadsheetId) {
-      throw new Error('GOOGLE_SHEETS_SPREADSHEET_ID is required when Google Sheets sync is enabled');
     }
 
     const credentials = this.loadCredentials(config);
@@ -113,18 +161,49 @@ export class GoogleSheetsSync {
     );
   }
 
-  async syncExpense(expense: ExpenseRecord): Promise<void> {
-    if (!this.enabled || !this.sheetsApiPromise || !this.spreadsheetId) {
+  private getUserSheetsApi(user: McpUserIdentity): sheets_v4.Sheets {
+    if (!user.googleAccessToken) {
+      throw new Error('Google OAuth Sheets sync requires a user Google access token');
+    }
+
+    const auth = new google.auth.OAuth2();
+    auth.setCredentials({
+      access_token: user.googleAccessToken,
+    });
+
+    return google.sheets({ version: 'v4', auth });
+  }
+
+  private async getSheetsApi(user: McpUserIdentity): Promise<sheets_v4.Sheets | null> {
+    if (this.useUserGoogleAuth) {
+      return this.getUserSheetsApi(user);
+    }
+
+    return this.sheetsApiPromise;
+  }
+
+  async syncExpense(expense: ExpenseRecord, user: McpUserIdentity): Promise<void> {
+    if (!this.enabled) {
       return;
     }
 
-    const sheets = await this.sheetsApiPromise;
-    const sheetRange = `${this.sheetName}!A:P`;
+    const sheets = await this.getSheetsApi(user);
 
-    await this.ensureHeader(sheets);
+    if (!sheets) {
+      return;
+    }
+
+    const spreadsheet = await this.spreadsheetRepository.getOrCreateForUser(
+      user,
+      () => this.createUserSpreadsheet(sheets, user),
+    );
+    const sheetRange = a1Range(this.sheetName, 'A:P');
+
+    await this.ensureDetailSheet(sheets, spreadsheet.spreadsheetId);
+    await this.ensureHeader(sheets, spreadsheet.spreadsheetId);
 
     const existing = await sheets.spreadsheets.values.get({
-      spreadsheetId: this.spreadsheetId,
+      spreadsheetId: spreadsheet.spreadsheetId,
       range: sheetRange,
     });
 
@@ -137,8 +216,8 @@ export class GoogleSheetsSync {
     if (targetRowIndex >= 0) {
       const rowNumber = targetRowIndex + 1;
       await sheets.spreadsheets.values.update({
-        spreadsheetId: this.spreadsheetId,
-        range: `${this.sheetName}!A${rowNumber}:P${rowNumber}`,
+        spreadsheetId: spreadsheet.spreadsheetId,
+        range: a1Range(this.sheetName, `A${rowNumber}:P${rowNumber}`),
         valueInputOption: 'RAW',
         requestBody: { values: rowValues },
       });
@@ -146,22 +225,96 @@ export class GoogleSheetsSync {
     }
 
     await sheets.spreadsheets.values.append({
-      spreadsheetId: this.spreadsheetId,
-      range: `${this.sheetName}!A:P`,
+      spreadsheetId: spreadsheet.spreadsheetId,
+      range: sheetRange,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: rowValues },
     });
   }
 
-  private async ensureHeader(sheets: sheets_v4.Sheets): Promise<void> {
-    if (!this.spreadsheetId) {
+  private async createUserSpreadsheet(
+    sheets: sheets_v4.Sheets,
+    user: McpUserIdentity,
+  ): Promise<NewUserSpreadsheet> {
+    const title = buildUserSpreadsheetTitle(this.sheetName, user);
+    const created = await sheets.spreadsheets.create({
+      requestBody: {
+        properties: {
+          title,
+        },
+        sheets: [
+          {
+            properties: {
+              title: this.sheetName,
+            },
+          },
+        ],
+      },
+      fields: 'spreadsheetId,spreadsheetUrl',
+    });
+    const spreadsheetId = created.data.spreadsheetId;
+
+    if (!spreadsheetId) {
+      throw new Error(`Google Sheets did not return a spreadsheet id for MCP user ${user.key}`);
+    }
+
+    return {
+      spreadsheetId,
+      spreadsheetUrl: created.data.spreadsheetUrl ?? null,
+      title,
+    };
+  }
+
+  private async ensureDetailSheet(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
+    const cacheKey = `${spreadsheetId}:${this.sheetName}`;
+
+    if (this.knownDetailSheets.has(cacheKey)) {
       return;
     }
 
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets(properties(title))',
+    });
+    const existingTitles =
+      spreadsheet.data.sheets
+        ?.map((sheet) => sheet.properties?.title)
+        .filter((title): title is string => Boolean(title)) ?? [];
+
+    if (existingTitles.includes(this.sheetName)) {
+      this.knownDetailSheets.add(cacheKey);
+      return;
+    }
+
+    try {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: this.sheetName,
+                },
+              },
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      if (!isDuplicateSheetTitleError(error)) {
+        throw error;
+      }
+    }
+
+    this.knownDetailSheets.add(cacheKey);
+  }
+
+  private async ensureHeader(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
     const existing = await sheets.spreadsheets.values.get({
-      spreadsheetId: this.spreadsheetId,
-      range: `${this.sheetName}!A1:P1`,
+      spreadsheetId,
+      range: a1Range(this.sheetName, 'A1:P1'),
     });
 
     const header = existing.data.values?.[0] ?? [];
@@ -172,8 +325,8 @@ export class GoogleSheetsSync {
     }
 
     await sheets.spreadsheets.values.update({
-      spreadsheetId: this.spreadsheetId,
-      range: `${this.sheetName}!A1:P1`,
+      spreadsheetId,
+      range: a1Range(this.sheetName, 'A1:P1'),
       valueInputOption: 'RAW',
       requestBody: { values: [HEADER] },
     });

@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
 
 import { ExpenseRepository } from './repository.js';
+import type { McpUserIdentity } from './sheetMappings.js';
 import { GoogleSheetsSync } from './sheets.js';
 import {
   addExpenseSchema,
@@ -14,36 +15,60 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-async function syncExpenseIfEnabled(sync: GoogleSheetsSync | null, expense: unknown) {
-  if (!sync) {
-    return;
+function requireMcpUser(user: McpUserIdentity | null): McpUserIdentity {
+  if (!user) {
+    throw new Error('This MCP server requires an authenticated user identity');
   }
 
-  await sync.syncExpense(
-    expense as {
-      id: number;
-      claimant: string;
-      amount: number;
-      amountCents: number;
-      currency: string;
-      expenseDate: string;
-      description: string;
-      category: string;
-      status: string;
-      submittedBy: string | null;
-      notes: string | null;
-      cancelledAt: string | null;
-      cancelledBy: string | null;
-      cancellationReason: string | null;
-      createdAt: string;
-      updatedAt: string;
-    },
-  );
+  return user;
+}
+
+async function syncExpenseIfEnabled(
+  sync: GoogleSheetsSync | null,
+  expense: unknown,
+  user: McpUserIdentity | null,
+): Promise<string | null> {
+  if (!sync) {
+    return null;
+  }
+
+  if (!user) {
+    throw new Error('Google Sheets sync requires an MCP user identity');
+  }
+
+  try {
+    await sync.syncExpense(
+      expense as {
+        id: number;
+        claimant: string;
+        amount: number;
+        amountCents: number;
+        currency: string;
+        expenseDate: string;
+        description: string;
+        category: string;
+        status: string;
+        submittedBy: string | null;
+        notes: string | null;
+        cancelledAt: string | null;
+        cancelledBy: string | null;
+        cancellationReason: string | null;
+        createdAt: string;
+        updatedAt: string;
+      },
+      user,
+    );
+    return null;
+  } catch (error) {
+    console.error('Failed to sync expense to Google Sheets', error);
+    return error instanceof Error ? error.message : 'Unknown Google Sheets sync error';
+  }
 }
 
 export function createAccountingServer(
   repository: ExpenseRepository,
   sheetsSync: GoogleSheetsSync | null,
+  mcpUser: McpUserIdentity | null,
 ) {
   const server = new McpServer({
     name: 'accounting-mcp',
@@ -59,22 +84,31 @@ export function createAccountingServer(
       inputSchema: addExpenseSchema.shape,
     },
     async (input) => {
+      const user = requireMcpUser(mcpUser);
       const parsed = addExpenseSchema.parse(input);
-      const saved = await repository.addExpense(parsed);
-      await syncExpenseIfEnabled(sheetsSync, saved);
+      const saved = await repository.addExpense(parsed, user.key);
+      const syncWarning = await syncExpenseIfEnabled(sheetsSync, saved, user);
 
       return {
         content: [
           {
             type: 'text',
-            text: `Expense saved for ${saved.claimant}: ${saved.amount} ${saved.currency} on ${saved.expenseDate}.`,
+            text: syncWarning
+              ? `Expense saved for ${saved.claimant}: ${saved.amount} ${saved.currency} on ${saved.expenseDate}. Google Sheets sync failed: ${syncWarning}`
+              : `Expense saved for ${saved.claimant}: ${saved.amount} ${saved.currency} on ${saved.expenseDate}.`,
           },
           {
             type: 'text',
             text: formatJson(saved),
           },
         ],
-        structuredContent: saved,
+        structuredContent: {
+          ...saved,
+          sheetsSync: {
+            ok: !syncWarning,
+            error: syncWarning,
+          },
+        },
       };
     },
   );
@@ -91,8 +125,9 @@ export function createAccountingServer(
       },
     },
     async (input) => {
+      const user = requireMcpUser(mcpUser);
       const parsed = listExpensesSchema.parse(input);
-      const result = await repository.listExpenses(parsed);
+      const result = await repository.listExpenses(parsed, user.key);
 
       return {
         content: [
@@ -119,22 +154,31 @@ export function createAccountingServer(
       inputSchema: cancelExpenseSchema.shape,
     },
     async (input) => {
+      const user = requireMcpUser(mcpUser);
       const parsed = cancelExpenseSchema.parse(input);
-      const cancelled = await repository.cancelExpense(parsed);
-      await syncExpenseIfEnabled(sheetsSync, cancelled);
+      const cancelled = await repository.cancelExpense(parsed, user.key);
+      const syncWarning = await syncExpenseIfEnabled(sheetsSync, cancelled, user);
 
       return {
         content: [
           {
             type: 'text',
-            text: `Expense ${cancelled.id} for ${cancelled.claimant} has been cancelled.`,
+            text: syncWarning
+              ? `Expense ${cancelled.id} for ${cancelled.claimant} has been cancelled. Google Sheets sync failed: ${syncWarning}`
+              : `Expense ${cancelled.id} for ${cancelled.claimant} has been cancelled.`,
           },
           {
             type: 'text',
             text: formatJson(cancelled),
           },
         ],
-        structuredContent: cancelled,
+        structuredContent: {
+          ...cancelled,
+          sheetsSync: {
+            ok: !syncWarning,
+            error: syncWarning,
+          },
+        },
       };
     },
   );
@@ -151,8 +195,9 @@ export function createAccountingServer(
       },
     },
     async (input) => {
+      const user = requireMcpUser(mcpUser);
       const parsed = summarySchema.parse(input);
-      const result = await repository.summarize(parsed);
+      const result = await repository.summarize(parsed, user.key);
 
       return {
         content: [
@@ -191,7 +236,7 @@ export function createAccountingServer(
               '2. list_expenses：按条件查询明细。',
               '3. cancel_expense：报销人发现填错后可撤销自己的记录。',
               '4. query_expense_summary：按人、类别、月份等维度统计汇总。',
-              '当 Google Sheets 同步启用时，新增和撤销会自动同步到表格。',
+              '当 Google Sheets 同步启用时，新增和撤销会自动同步到当前 MCP 调用用户的个人 Google Sheets 文件。',
               '建议在写入前先向用户确认报销人、金额、日期和内容，再调用 add_expense。',
             ].join('\n')
           : [
@@ -200,7 +245,7 @@ export function createAccountingServer(
               '2. list_expenses: fetch detailed expense rows with filters.',
               '3. cancel_expense: let a claimant withdraw a mistaken reimbursement record.',
               '4. query_expense_summary: aggregate totals by claimant, category, month, and more.',
-              'When Google Sheets sync is enabled, writes and cancellations update the sheet automatically.',
+              'When Google Sheets sync is enabled, writes and cancellations update the current MCP caller-specific Google Sheets file automatically.',
               'Confirm claimant, amount, expense date, and description before calling add_expense.',
             ].join('\n');
 
