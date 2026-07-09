@@ -6,6 +6,7 @@ export type AppConfig = {
   allowedHosts: string[];
   port: number;
   userHeader: string;
+  googleOAuthAllowedClientIds: string[];
   googleOAuthAllowedEmails: string[];
   googleOAuthAllowedDomains: string[];
   sheets: {
@@ -30,7 +31,8 @@ function parsePort(value: string | undefined, fallback: number): number {
   return port;
 }
 
-function parseAllowedHosts(value: string | undefined): string[] {
+/** Split a comma-separated env var, preserving case. */
+function parseList(value: string | undefined): string[] {
   if (!value) {
     return [];
   }
@@ -41,15 +43,13 @@ function parseAllowedHosts(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-function parseCsv(value: string | undefined): string[] {
-  if (!value) {
-    return [];
-  }
-
-  return value
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
+/**
+ * Split a comma-separated env var and normalize to lowercase.
+ * Only for case-insensitive values such as email addresses and domains —
+ * OAuth client ids must keep their original case.
+ */
+function parseLowercaseList(value: string | undefined): string[] {
+  return parseList(value).map((item) => item.toLowerCase());
 }
 
 export function loadConfig(): AppConfig {
@@ -78,11 +78,12 @@ export function loadConfig(): AppConfig {
     apiKey,
     databaseUrl,
     host: process.env.HOST?.trim() || '0.0.0.0',
-    allowedHosts: parseAllowedHosts(process.env.ALLOWED_HOSTS),
+    allowedHosts: parseList(process.env.ALLOWED_HOSTS),
     port: parsePort(process.env.PORT, 4011),
     userHeader: process.env.ACCOUNTING_MCP_USER_HEADER?.trim() || 'x-accounting-user',
-    googleOAuthAllowedEmails: parseCsv(process.env.GOOGLE_OAUTH_ALLOWED_EMAILS),
-    googleOAuthAllowedDomains: parseCsv(process.env.GOOGLE_OAUTH_ALLOWED_DOMAINS),
+    googleOAuthAllowedClientIds: parseList(process.env.GOOGLE_OAUTH_ALLOWED_CLIENT_IDS),
+    googleOAuthAllowedEmails: parseLowercaseList(process.env.GOOGLE_OAUTH_ALLOWED_EMAILS),
+    googleOAuthAllowedDomains: parseLowercaseList(process.env.GOOGLE_OAUTH_ALLOWED_DOMAINS),
     sheets: {
       enabled: sheetsEnabled,
       useUserGoogleAuth: authMode === 'google_oauth',

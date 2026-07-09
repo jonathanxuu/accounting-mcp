@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
 import type { Request, Response, NextFunction } from 'express';
 
-import { authenticateGoogleAccessToken } from './googleOAuth.js';
+import { authenticateGoogleAccessToken, GoogleOAuthForbiddenError } from './googleOAuth.js';
 import { loadConfig } from './config.js';
 import { createAccountingServer } from './mcp.js';
 import { createPool, initializeDatabase } from './postgres.js';
@@ -14,6 +14,22 @@ import type { McpUserIdentity } from './sheetMappings.js';
 import { GoogleSheetsSync } from './sheets.js';
 
 const config = loadConfig();
+
+// Google's tokeninfo endpoint validates any Google access token, whoever issued
+// it. With no audience and no email/domain allowlist, every Google account on
+// the internet can reach this server's tools.
+if (
+  config.authMode === 'google_oauth' &&
+  config.googleOAuthAllowedClientIds.length === 0 &&
+  config.googleOAuthAllowedEmails.length === 0 &&
+  config.googleOAuthAllowedDomains.length === 0
+) {
+  console.warn(
+    'Warning: google_oauth mode accepts any valid Google access token. ' +
+      'Set GOOGLE_OAUTH_ALLOWED_CLIENT_IDS to restrict access to tokens issued by your own OAuth client.',
+  );
+}
+
 const pool = createPool(config.databaseUrl);
 await initializeDatabase(pool);
 const repository = new ExpenseRepository(pool);
@@ -47,10 +63,23 @@ function bearerToken(req: Request): string | null {
   return authHeader.slice('Bearer '.length).trim() || null;
 }
 
+/** The token is missing or unusable; the client should obtain a new one and retry. */
 function rejectUnauthorized(res: Response, message: string) {
   res.setHeader('WWW-Authenticate', 'Bearer');
   res.status(401).json({
     error: 'Unauthorized',
+    message,
+  });
+}
+
+/**
+ * The caller is authenticated but not permitted. Deliberately omits
+ * `WWW-Authenticate` so OAuth clients surface the error instead of looping
+ * through the sign-in flow with a token that will be rejected identically.
+ */
+function rejectForbidden(res: Response, message: string) {
+  res.status(403).json({
+    error: 'Forbidden',
     message,
   });
 }
@@ -76,11 +105,21 @@ async function authenticateRequest(req: Request, res: Response, next: NextFuncti
 
   try {
     res.locals.mcpUser = await authenticateGoogleAccessToken(token, {
+      allowedClientIds: config.googleOAuthAllowedClientIds,
       allowedEmails: config.googleOAuthAllowedEmails,
       allowedDomains: config.googleOAuthAllowedDomains,
     });
   } catch (error) {
     console.error('Failed to authenticate Google OAuth token', error);
+
+    // Policy rejections are permanent for this identity, so they answer 403.
+    // Returning 401 here would tell the client its token went stale, sending it
+    // back through the OAuth flow to be rejected again, forever.
+    if (error instanceof GoogleOAuthForbiddenError) {
+      rejectForbidden(res, error.message);
+      return;
+    }
+
     rejectUnauthorized(res, 'Provide a valid Google OAuth Bearer token.');
     return;
   }

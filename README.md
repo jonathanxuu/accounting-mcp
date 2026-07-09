@@ -132,12 +132,26 @@ Scope: openid email profile https://www.googleapis.com/auth/spreadsheets
 
 Add the connector's displayed Redirect URI to the Google OAuth client's authorized redirect URIs.
 
-For production, restrict which Google accounts may call the MCP server with one or both of:
+### Restricting access
+
+The server validates bearer tokens against Google's tokeninfo endpoint, which accepts **any** valid Google access token regardless of which application issued it. Set `GOOGLE_OAUTH_ALLOWED_CLIENT_IDS` so only tokens minted by your own OAuth client are accepted:
+
+```text
+GOOGLE_OAUTH_ALLOWED_CLIENT_IDS=1234-abc.apps.googleusercontent.com
+```
+
+List every client id you use, comma-separated, if different front ends have their own OAuth clients. When this is unset, the server logs a warning at startup and accepts any Google account.
+
+That check alone lets any Google account sign in through your own connector. To narrow it further, add one or both of:
 
 ```text
 GOOGLE_OAUTH_ALLOWED_DOMAINS=example.com
 GOOGLE_OAUTH_ALLOWED_EMAILS=alice@example.com,bob@example.com
 ```
+
+These match the **email address of the signing-in Google account**, not the domain the MCP client is hosted on. A caller passes when its address is in `GOOGLE_OAUTH_ALLOWED_EMAILS` **or** its domain is in `GOOGLE_OAUTH_ALLOWED_DOMAINS`; leaving both unset accepts every account.
+
+Callers rejected by these policies get `403 Forbidden` with the reason. They deliberately do not get `401`, which would tell the MCP client its token had expired and send it back through the OAuth flow to be rejected again — leaving it stuck on the Google sign-in page. `401` is reserved for a missing, expired, or revoked token.
 
 In `api_key` mode, provide service account Google credentials with one of:
 
