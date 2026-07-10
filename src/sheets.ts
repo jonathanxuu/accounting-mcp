@@ -34,6 +34,13 @@ type SheetsConfig = {
   serviceAccountKeyJson?: string;
 };
 
+export type WorksheetSyncResult = {
+  spreadsheetId: string;
+  spreadsheetUrl: string | null;
+  worksheetName: string;
+  rowCount: number;
+};
+
 const HEADER = [
   'expense_id',
   'claimant',
@@ -116,6 +123,20 @@ function toRow(expense: ExpenseRecord): string[] {
     expense.createdAt,
     expense.updatedAt,
   ];
+}
+
+function toSheetValuesRow(values: unknown[]): string[] {
+  return values.map((value) => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+
+    return String(value);
+  });
 }
 
 export class GoogleSheetsSync {
@@ -233,6 +254,53 @@ export class GoogleSheetsSync {
     });
   }
 
+  async syncWorksheetView(
+    user: McpUserIdentity,
+    input: {
+      worksheetName: string;
+      header: string[];
+      rows: unknown[][];
+    },
+  ): Promise<WorksheetSyncResult> {
+    if (!this.enabled) {
+      throw new Error('Google Sheets sync is not enabled');
+    }
+
+    const sheets = await this.getSheetsApi(user);
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const spreadsheet = await this.spreadsheetRepository.getOrCreateForUser(
+      user,
+      () => this.createUserSpreadsheet(sheets, user),
+    );
+
+    const worksheetName = buildDetailSheetName(input.worksheetName);
+    await this.ensureNamedSheet(sheets, spreadsheet.spreadsheetId, worksheetName);
+
+    const values = [input.header, ...input.rows.map(toSheetValuesRow)];
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: spreadsheet.spreadsheetId,
+      range: a1Range(worksheetName, 'A:ZZ'),
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: spreadsheet.spreadsheetId,
+      range: a1Range(worksheetName, 'A1'),
+      valueInputOption: 'RAW',
+      requestBody: {
+        values,
+      },
+    });
+
+    return {
+      spreadsheetId: spreadsheet.spreadsheetId,
+      spreadsheetUrl: spreadsheet.spreadsheetUrl,
+      worksheetName,
+      rowCount: input.rows.length,
+    };
+  }
+
   private async createUserSpreadsheet(
     sheets: sheets_v4.Sheets,
     user: McpUserIdentity,
@@ -267,7 +335,15 @@ export class GoogleSheetsSync {
   }
 
   private async ensureDetailSheet(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
-    const cacheKey = `${spreadsheetId}:${this.sheetName}`;
+    await this.ensureNamedSheet(sheets, spreadsheetId, this.sheetName);
+  }
+
+  private async ensureNamedSheet(
+    sheets: sheets_v4.Sheets,
+    spreadsheetId: string,
+    sheetName: string,
+  ): Promise<void> {
+    const cacheKey = `${spreadsheetId}:${sheetName}`;
 
     if (this.knownDetailSheets.has(cacheKey)) {
       return;
@@ -282,7 +358,7 @@ export class GoogleSheetsSync {
         ?.map((sheet) => sheet.properties?.title)
         .filter((title): title is string => Boolean(title)) ?? [];
 
-    if (existingTitles.includes(this.sheetName)) {
+    if (existingTitles.includes(sheetName)) {
       this.knownDetailSheets.add(cacheKey);
       return;
     }
@@ -295,7 +371,7 @@ export class GoogleSheetsSync {
             {
               addSheet: {
                 properties: {
-                  title: this.sheetName,
+                  title: sheetName,
                 },
               },
             },

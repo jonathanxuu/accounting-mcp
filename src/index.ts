@@ -12,6 +12,7 @@ import { ExpenseRepository } from './repository.js';
 import { UserSpreadsheetRepository } from './sheetMappings.js';
 import type { McpUserIdentity } from './sheetMappings.js';
 import { GoogleSheetsSync } from './sheets.js';
+import { WorkflowRepository } from './workflowRepository.js';
 
 const config = loadConfig();
 
@@ -33,6 +34,7 @@ if (
 const pool = createPool(config.databaseUrl);
 await initializeDatabase(pool);
 const repository = new ExpenseRepository(pool);
+const workflowRepository = new WorkflowRepository(pool);
 const spreadsheetRepository = new UserSpreadsheetRepository(pool);
 
 // Heal spreadsheet creations that a previous crash or restart left half-done.
@@ -180,7 +182,7 @@ app.post('/mcp', async (req, res) => {
     return;
   }
 
-  const server = createAccountingServer(repository, sheetsSync, mcpUser);
+  const server = createAccountingServer(repository, workflowRepository, sheetsSync, mcpUser);
 
   try {
     const transport = new StreamableHTTPServerTransport({
