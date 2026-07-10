@@ -15,9 +15,9 @@ COPY src ./src
 
 RUN npm run build
 
-ENV PORT=4011
+ENV PORT=4010
 ENV HOST=0.0.0.0
 
-EXPOSE 4011
+EXPOSE 4010
 
 CMD ["npm", "run", "start"]

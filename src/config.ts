@@ -79,7 +79,7 @@ export function loadConfig(): AppConfig {
     databaseUrl,
     host: process.env.HOST?.trim() || '0.0.0.0',
     allowedHosts: parseList(process.env.ALLOWED_HOSTS),
-    port: parsePort(process.env.PORT, 4011),
+    port: parsePort(process.env.PORT, 4010),
     userHeader: process.env.ACCOUNTING_MCP_USER_HEADER?.trim() || 'x-accounting-user',
     googleOAuthAllowedClientIds: parseList(process.env.GOOGLE_OAUTH_ALLOWED_CLIENT_IDS),
     googleOAuthAllowedEmails: parseLowercaseList(process.env.GOOGLE_OAUTH_ALLOWED_EMAILS),
