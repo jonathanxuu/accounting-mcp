@@ -32,6 +32,7 @@ const jsonObjectSchema = z.record(z.string(), z.unknown()).default({});
 const stringArraySchema = z.array(z.string().trim().min(1)).default([]);
 const idArraySchema = z.array(z.number().int().positive()).default([]);
 const worksheetNameSchema = z.string().trim().min(1).max(100);
+const driveFileIdSchema = z.string().trim().min(1).max(255);
 
 export const addExpenseSchema = z.object({
   claimant: z.string().trim().min(1).max(100).describe('The reimbursement claimant name'),
@@ -291,6 +292,23 @@ export const deleteSavedViewSchema = z
     path: ['savedViewId'],
   });
 
+export const listGoogleDriveFilesSchema = z.object({
+  query: z.string().trim().min(1).max(200).optional(),
+  folderId: driveFileIdSchema.optional(),
+  mimeType: z.string().trim().min(1).max(200).optional(),
+  includeTrashed: z.boolean().default(false),
+  pageSize: z.number().int().min(1).max(100).default(20),
+});
+
+export const readGoogleDriveFileSchema = z.object({
+  fileId: driveFileIdSchema.describe('Google Drive file id'),
+});
+
+export const updateGoogleDriveFileSchema = z.object({
+  fileId: driveFileIdSchema.describe('Google Drive file id'),
+  content: z.string().max(1_000_000).describe('Replacement file content as plain text'),
+});
+
 export type AddExpenseInput = z.infer<typeof addExpenseSchema>;
 export type CancelExpenseInput = z.infer<typeof cancelExpenseSchema>;
 export type ListExpensesInput = z.infer<typeof listExpensesSchema>;
@@ -306,3 +324,6 @@ export type RunSavedViewInput = z.infer<typeof runSavedViewSchema>;
 export type DeleteSavedViewInput = z.infer<typeof deleteSavedViewSchema>;
 export type UpsertReconciliationLinkInput = z.infer<typeof upsertReconciliationLinkSchema>;
 export type ListReconciliationLinksInput = z.infer<typeof listReconciliationLinksSchema>;
+export type ListGoogleDriveFilesInput = z.infer<typeof listGoogleDriveFilesSchema>;
+export type ReadGoogleDriveFileInput = z.infer<typeof readGoogleDriveFileSchema>;
+export type UpdateGoogleDriveFileInput = z.infer<typeof updateGoogleDriveFileSchema>;

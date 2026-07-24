@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
 
+import { GoogleDriveFiles } from './drive.js';
 import { ExpenseRepository } from './repository.js';
 import type { McpUserIdentity } from './sheetMappings.js';
 import { GoogleSheetsSync } from './sheets.js';
@@ -10,13 +11,16 @@ import {
   cancelExpenseSchema,
   deleteSavedViewSchema,
   ingestSourceMaterialSchema,
+  listGoogleDriveFilesSchema,
   listExpensesSchema,
   listReconciliationLinksSchema,
   listSavedViewsSchema,
   listReviewItemsSchema,
+  readGoogleDriveFileSchema,
   runSavedViewSchema,
   searchAccountingRecordsSchema,
   summarySchema,
+  updateGoogleDriveFileSchema,
   upsertAccountingCaseSchema,
   upsertAccountingRecordSchema,
   upsertReconciliationLinkSchema,
@@ -265,6 +269,100 @@ export function createAccountingServer(
     name: 'accounting-mcp',
     version: '0.1.0',
   });
+  const driveFiles = new GoogleDriveFiles();
+
+  server.registerTool(
+    'list_google_drive_files',
+    {
+      title: 'List Google Drive Files',
+      description:
+        'List the current Google OAuth user’s Google Drive files with optional query, folder, or mime-type filters.',
+      inputSchema: listGoogleDriveFilesSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+      },
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = listGoogleDriveFilesSchema.parse(input);
+      const result = await driveFiles.listFiles(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${result.items.length} Google Drive files.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'read_google_drive_file',
+    {
+      title: 'Read Google Drive File',
+      description:
+        'Read a Google Docs document or text-like Google Drive file using the current Google OAuth user token.',
+      inputSchema: readGoogleDriveFileSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+      },
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = readGoogleDriveFileSchema.parse(input);
+      const result = await driveFiles.readFile(user, parsed.fileId);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Read Google Drive file ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: result.content,
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'update_google_drive_file',
+    {
+      title: 'Update Google Drive File',
+      description:
+        'Replace the full content of a Google Docs document or text-like Google Drive file using the current Google OAuth user token.',
+      inputSchema: updateGoogleDriveFileSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = updateGoogleDriveFileSchema.parse(input);
+      const result = await driveFiles.updateFile(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Updated Google Drive file ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
 
   server.registerTool(
     'upsert_accounting_case',
@@ -902,7 +1000,11 @@ export function createAccountingServer(
               '13. list_saved_views：查看已保存查询视图。',
               '14. run_saved_view：重新执行已保存视图，并可同步到 worksheet。',
               '15. delete_saved_view：删除不再需要的已保存视图。',
+              '16. list_google_drive_files：查看当前 Google 用户可访问的 Drive 文件。',
+              '17. read_google_drive_file：读取 Google Docs 或文本类 Drive 文件内容。',
+              '18. update_google_drive_file：覆盖更新 Google Docs 或文本类 Drive 文件内容。',
               '当 Google Sheets 同步启用时，新增和撤销会自动同步到当前 MCP 调用用户的个人 Google Sheets 文件。',
+              'Google Drive 文件读取/编辑依赖当前 Google OAuth token 拥有相应 Drive scope。',
               '建议在写入前先向用户确认报销人、金额、日期和内容，再调用 add_expense。',
             ].join('\n')
           : [
@@ -922,7 +1024,11 @@ export function createAccountingServer(
               '13. list_saved_views: inspect previously saved query views.',
               '14. run_saved_view: rerun a saved view and optionally sync it to a worksheet.',
               '15. delete_saved_view: remove a saved view that is no longer needed.',
+              '16. list_google_drive_files: inspect Google Drive files available to the current Google user.',
+              '17. read_google_drive_file: read a Google Docs or text-like Drive file.',
+              '18. update_google_drive_file: replace the content of a Google Docs or text-like Drive file.',
               'When Google Sheets sync is enabled, writes and cancellations update the current MCP caller-specific Google Sheets file automatically.',
+              'Google Drive file access depends on the current Google OAuth token having sufficient Drive scopes.',
               'Confirm claimant, amount, expense date, and description before calling add_expense.',
             ].join('\n');
 
