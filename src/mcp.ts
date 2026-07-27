@@ -8,23 +8,32 @@ import { GoogleSheetsSync } from './sheets.js';
 import { WorkflowRepository } from './workflowRepository.js';
 import {
   addExpenseSchema,
+  abortGoogleDriveUploadSchema,
   cancelExpenseSchema,
+  createGoogleDriveFolderSchema,
+  createGoogleDriveTextFileSchema,
   deleteSavedViewSchema,
   ingestSourceMaterialSchema,
+  appendGoogleDriveUploadChunkSchema,
   listGoogleDriveFilesSchema,
   listExpensesSchema,
   listReconciliationLinksSchema,
   listSavedViewsSchema,
   listReviewItemsSchema,
+  moveGoogleDriveFileSchema,
   readGoogleDriveFileSchema,
   runSavedViewSchema,
   searchAccountingRecordsSchema,
+  startGoogleDriveUploadSchema,
   summarySchema,
+  uploadGoogleDriveFileAutoSchema,
+  uploadGoogleDriveFileSchema,
   updateGoogleDriveFileSchema,
   upsertAccountingCaseSchema,
   upsertAccountingRecordSchema,
   upsertReconciliationLinkSchema,
   upsertReviewItemSchema,
+  finishGoogleDriveUploadSchema,
 } from './schema.js';
 
 function formatJson(value: unknown): string {
@@ -353,6 +362,267 @@ export function createAccountingServer(
           {
             type: 'text',
             text: `Updated Google Drive file ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'move_google_drive_file',
+    {
+      title: 'Move Google Drive File',
+      description:
+        'Move a Google Drive file into a target folder for the current Google OAuth user.',
+      inputSchema: moveGoogleDriveFileSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = moveGoogleDriveFileSchema.parse(input);
+      const result = await driveFiles.moveFile(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Moved Google Drive file ${result.name} into folder ${result.destinationFolderId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'create_google_drive_folder',
+    {
+      title: 'Create Google Drive Folder',
+      description:
+        'Create a Google Drive folder for the current Google OAuth user, optionally under a parent folder.',
+      inputSchema: createGoogleDriveFolderSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = createGoogleDriveFolderSchema.parse(input);
+      const result = await driveFiles.createFolder(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Created Google Drive folder ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'create_google_drive_text_file',
+    {
+      title: 'Create Google Drive Text File',
+      description:
+        'Create a Google Docs document or text-like Google Drive file for the current Google OAuth user. Do not use this tool for PDFs, images, Office files, archives, or other binary uploads; use upload_google_drive_file_auto instead.',
+      inputSchema: createGoogleDriveTextFileSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = createGoogleDriveTextFileSchema.parse(input);
+      const result = await driveFiles.createFile(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Created Google Drive file ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'upload_google_drive_file_auto',
+    {
+      title: 'Upload Google Drive File Automatically',
+      description:
+        'Upload any binary or non-text file such as PDF, image, Office document, archive, audio, or video to Google Drive. The server automatically chooses the safer upload strategy based on content size. Agents should prefer this tool over guessing between small-file and chunked uploads.',
+      inputSchema: uploadGoogleDriveFileAutoSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = uploadGoogleDriveFileAutoSchema.parse(input);
+      const result = await driveFiles.uploadFileAuto(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Uploaded Google Drive file ${result.name} using ${result.uploadStrategy} mode.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'upload_google_drive_file',
+    {
+      title: 'Upload Google Drive File',
+      description:
+        'Upload a smaller file to Google Drive in a single call using base64 content.',
+      inputSchema: uploadGoogleDriveFileSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = uploadGoogleDriveFileSchema.parse(input);
+      const result = await driveFiles.uploadFile(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Uploaded Google Drive file ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'start_google_drive_upload',
+    {
+      title: 'Start Google Drive Upload',
+      description:
+        'Start a chunked Google Drive upload session for larger files and receive an upload session id.',
+      inputSchema: startGoogleDriveUploadSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = startGoogleDriveUploadSchema.parse(input);
+      const result = await driveFiles.startUpload(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Started Google Drive upload session ${result.uploadId} for ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'append_google_drive_upload_chunk',
+    {
+      title: 'Append Google Drive Upload Chunk',
+      description:
+        'Append one base64-encoded chunk to a previously started Google Drive upload session.',
+      inputSchema: appendGoogleDriveUploadChunkSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = appendGoogleDriveUploadChunkSchema.parse(input);
+      const result = await driveFiles.appendUploadChunk(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Appended chunk to Google Drive upload session ${result.uploadId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'finish_google_drive_upload',
+    {
+      title: 'Finish Google Drive Upload',
+      description:
+        'Finish a chunked Google Drive upload session and create the final Drive file.',
+      inputSchema: finishGoogleDriveUploadSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = finishGoogleDriveUploadSchema.parse(input);
+      const result = await driveFiles.finishUpload(user, parsed.uploadId);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Finished Google Drive upload for ${result.name}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'abort_google_drive_upload',
+    {
+      title: 'Abort Google Drive Upload',
+      description:
+        'Abort a chunked Google Drive upload session and delete the temporary staged file.',
+      inputSchema: abortGoogleDriveUploadSchema.shape,
+    },
+    async (input) => {
+      const user = requireMcpUser(mcpUser);
+      const parsed = abortGoogleDriveUploadSchema.parse(input);
+      const result = await driveFiles.abortUpload(user, parsed.uploadId);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Aborted Google Drive upload session ${result.uploadId}.`,
           },
           {
             type: 'text',
@@ -1003,6 +1273,15 @@ export function createAccountingServer(
               '16. list_google_drive_files：查看当前 Google 用户可访问的 Drive 文件。',
               '17. read_google_drive_file：读取 Google Docs 或文本类 Drive 文件内容。',
               '18. update_google_drive_file：覆盖更新 Google Docs 或文本类 Drive 文件内容。',
+              '19. move_google_drive_file：把 Drive 文件移动到指定文件夹。',
+              '20. create_google_drive_folder：在 Drive 中创建文件夹。',
+              '21. create_google_drive_text_file：仅用于创建 Google Docs 或文本类文件，不要用于 PDF、图片、Office 文档或压缩包。',
+              '22. upload_google_drive_file_auto：PDF、图片、Office 文档、压缩包等文件优先使用这个统一上传入口，服务端会自动选择上传策略。',
+              '23. upload_google_drive_file：单次上传较小文件。',
+              '24. start_google_drive_upload：开始大文件分片上传会话。',
+              '25. append_google_drive_upload_chunk：向上传会话追加一个分片。',
+              '26. finish_google_drive_upload：完成分片上传并写入 Drive。',
+              '27. abort_google_drive_upload：取消分片上传并清理临时文件。',
               '当 Google Sheets 同步启用时，新增和撤销会自动同步到当前 MCP 调用用户的个人 Google Sheets 文件。',
               'Google Drive 文件读取/编辑依赖当前 Google OAuth token 拥有相应 Drive scope。',
               '建议在写入前先向用户确认报销人、金额、日期和内容，再调用 add_expense。',
@@ -1027,6 +1306,15 @@ export function createAccountingServer(
               '16. list_google_drive_files: inspect Google Drive files available to the current Google user.',
               '17. read_google_drive_file: read a Google Docs or text-like Drive file.',
               '18. update_google_drive_file: replace the content of a Google Docs or text-like Drive file.',
+              '19. move_google_drive_file: move a Drive file into a target folder.',
+              '20. create_google_drive_folder: create a Drive folder.',
+              '21. create_google_drive_text_file: only for Google Docs or text-like Drive files, not for PDFs, images, Office files, or archives.',
+              '22. upload_google_drive_file_auto: preferred unified upload entrypoint for PDFs, images, Office files, archives, and other non-text files; the server chooses the upload strategy automatically.',
+              '23. upload_google_drive_file: upload a smaller file in one call.',
+              '24. start_google_drive_upload: begin a chunked upload session for a larger file.',
+              '25. append_google_drive_upload_chunk: append one chunk to an upload session.',
+              '26. finish_google_drive_upload: finalize a chunked upload into Drive.',
+              '27. abort_google_drive_upload: cancel a chunked upload and remove temp data.',
               'When Google Sheets sync is enabled, writes and cancellations update the current MCP caller-specific Google Sheets file automatically.',
               'Google Drive file access depends on the current Google OAuth token having sufficient Drive scopes.',
               'Confirm claimant, amount, expense date, and description before calling add_expense.',

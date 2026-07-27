@@ -309,6 +309,91 @@ export const updateGoogleDriveFileSchema = z.object({
   content: z.string().max(1_000_000).describe('Replacement file content as plain text'),
 });
 
+export const createGoogleDriveFolderSchema = z.object({
+  name: z.string().trim().min(1).max(255).describe('Google Drive folder name'),
+  parentFolderId: driveFileIdSchema.optional().describe('Optional parent Google Drive folder id'),
+});
+
+export const createGoogleDriveTextFileSchema = z.object({
+  name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
+  mimeType: z
+    .string()
+    .trim()
+    .min(1)
+    .max(255)
+    .describe('Target mime type such as text/plain or application/vnd.google-apps.document'),
+  parentFolderId: driveFileIdSchema.optional().describe('Optional parent Google Drive folder id'),
+  content: z
+    .string()
+    .max(1_000_000)
+    .optional()
+    .describe('Optional plain-text content for Google Docs or text-like files'),
+});
+
+export const uploadGoogleDriveFileSchema = z.object({
+  name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
+  mimeType: z.string().trim().min(1).max(255).describe('Mime type for the uploaded file'),
+  parentFolderId: driveFileIdSchema.optional().describe('Optional parent Google Drive folder id'),
+  contentBase64: z
+    .string()
+    .trim()
+    .min(1)
+    .max(10_000_000)
+    .describe('Base64-encoded file content for smaller uploads'),
+});
+
+export const uploadGoogleDriveFileAutoSchema = z.object({
+  name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
+  mimeType: z.string().trim().min(1).max(255).describe('Mime type for the uploaded file'),
+  parentFolderId: driveFileIdSchema.optional().describe('Optional parent Google Drive folder id'),
+  contentBase64: z
+    .string()
+    .trim()
+    .min(1)
+    .max(25_000_000)
+    .describe('Base64-encoded file content. The server will choose the upload strategy automatically.'),
+});
+
+export const startGoogleDriveUploadSchema = z.object({
+  name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
+  mimeType: z.string().trim().min(1).max(255).describe('Mime type for the uploaded file'),
+  parentFolderId: driveFileIdSchema.optional().describe('Optional parent Google Drive folder id'),
+  totalBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(1024 * 1024 * 1024)
+    .optional()
+    .describe('Optional expected total byte size'),
+});
+
+export const appendGoogleDriveUploadChunkSchema = z.object({
+  uploadId: z.string().trim().min(1).max(255).describe('Upload session id'),
+  contentBase64: z
+    .string()
+    .trim()
+    .min(1)
+    .max(10_000_000)
+    .describe('Base64-encoded chunk content to append to the upload session'),
+});
+
+export const finishGoogleDriveUploadSchema = z.object({
+  uploadId: z.string().trim().min(1).max(255).describe('Upload session id'),
+});
+
+export const abortGoogleDriveUploadSchema = z.object({
+  uploadId: z.string().trim().min(1).max(255).describe('Upload session id'),
+});
+
+export const moveGoogleDriveFileSchema = z.object({
+  fileId: driveFileIdSchema.describe('Google Drive file id to move'),
+  destinationFolderId: driveFileIdSchema.describe('Target Google Drive folder id'),
+  removeFromPreviousParents: z
+    .boolean()
+    .default(true)
+    .describe('Whether to remove the file from its previous parent folders after moving'),
+});
+
 export type AddExpenseInput = z.infer<typeof addExpenseSchema>;
 export type CancelExpenseInput = z.infer<typeof cancelExpenseSchema>;
 export type ListExpensesInput = z.infer<typeof listExpensesSchema>;
@@ -327,3 +412,14 @@ export type ListReconciliationLinksInput = z.infer<typeof listReconciliationLink
 export type ListGoogleDriveFilesInput = z.infer<typeof listGoogleDriveFilesSchema>;
 export type ReadGoogleDriveFileInput = z.infer<typeof readGoogleDriveFileSchema>;
 export type UpdateGoogleDriveFileInput = z.infer<typeof updateGoogleDriveFileSchema>;
+export type CreateGoogleDriveFolderInput = z.infer<typeof createGoogleDriveFolderSchema>;
+export type CreateGoogleDriveTextFileInput = z.infer<typeof createGoogleDriveTextFileSchema>;
+export type UploadGoogleDriveFileInput = z.infer<typeof uploadGoogleDriveFileSchema>;
+export type UploadGoogleDriveFileAutoInput = z.infer<typeof uploadGoogleDriveFileAutoSchema>;
+export type StartGoogleDriveUploadInput = z.infer<typeof startGoogleDriveUploadSchema>;
+export type AppendGoogleDriveUploadChunkInput = z.infer<
+  typeof appendGoogleDriveUploadChunkSchema
+>;
+export type FinishGoogleDriveUploadInput = z.infer<typeof finishGoogleDriveUploadSchema>;
+export type AbortGoogleDriveUploadInput = z.infer<typeof abortGoogleDriveUploadSchema>;
+export type MoveGoogleDriveFileInput = z.infer<typeof moveGoogleDriveFileSchema>;

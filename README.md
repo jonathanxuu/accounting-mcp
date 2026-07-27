@@ -127,10 +127,12 @@ Client ID: your Google OAuth web client id
 Client Secret: your Google OAuth web client secret
 Auth URL: https://accounts.google.com/o/oauth2/v2/auth
 Token URL: https://oauth2.googleapis.com/token
-Scope: openid email profile https://www.googleapis.com/auth/spreadsheets
+Scope: openid email profile https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive
 ```
 
 Add the connector's displayed Redirect URI to the Google OAuth client's authorized redirect URIs.
+
+The broader Drive scope is recommended when the MCP server needs to create folders, create files, upload files, or write into user-selected Drive locations instead of being limited to narrower file access patterns.
 
 ### Restricting access
 
@@ -219,6 +221,10 @@ docker run --rm \
 - Use `cancel_expense` when a claimant needs to withdraw a mistaken record.
 - Use `query_expense_summary` for reporting.
 - When Sheets sync is enabled, let finance users use the MCP caller-specific spreadsheets as live detail views rather than the source of truth.
+- Use `create_google_drive_folder` when the destination Drive folder does not exist yet.
+- Prefer `upload_google_drive_file_auto` so the server chooses the upload strategy instead of relying on the agent to guess.
+- Use `upload_google_drive_file` for smaller files that fit in a single tool call.
+- Use `start_google_drive_upload`, `append_google_drive_upload_chunk`, and `finish_google_drive_upload` for larger files or folder trees.
 
 ## Next Production Steps
 
