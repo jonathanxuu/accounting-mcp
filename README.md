@@ -10,6 +10,8 @@ An HTTP MCP server for reimbursement collection and reporting with PostgreSQL/Cl
 - `query_expense_summary`: aggregate totals by claimant, category, status, currency, day, or month
 - `get_accounting_usage_guide`: short usage guide for the agent
 - Optional real-time sync of expense detail rows into MCP caller-specific Google Sheets files
+- Workspace shared Google Sheets for multi-user accounting collaboration
+- Google Drive folder creation, file upload, and file move tools for OAuth users
 
 ## Stack
 
@@ -102,6 +104,33 @@ The app auto-creates the `expenses` table and indexes at startup.
 ## Google Sheets Sync
 
 When `GOOGLE_SHEETS_SYNC_ENABLED=true`, each `add_expense` and `cancel_expense` call updates a Google Sheets file owned by the current MCP caller identity in near real time.
+
+### Shared workspace sheet mode
+
+For accounting workflow collaboration, the server can also maintain one shared Google Sheet per `workspaceId`.
+
+Recommended flow:
+
+1. Accountant A signs in with Google OAuth.
+2. Accountant A calls `create_shared_google_sheet` for a workspace such as `acme-cn-2026-07`.
+3. Accountant A calls `share_shared_google_sheet` to add client B or another accountant by email.
+4. Client B signs in with their own Google OAuth account.
+5. B ingests source materials or runs queries inside the same workspace.
+6. The server writes those updates into the same shared Google Sheet.
+
+Important behavior:
+
+- Workspace data still lives in PostgreSQL / Cloud SQL as the source of truth.
+- The shared sheet is a synchronized collaboration view for that workspace.
+- Once a user has been added through `share_shared_google_sheet`, that user can access workspace data paths guarded by the same workspace membership.
+- `ingest_source_material` appends rows into the shared sheet's `Source Materials` tab when the case belongs to a workspace that already has a shared sheet.
+- `search_accounting_records`, `list_review_items`, and `run_saved_view` will sync to the workspace shared sheet when `workspaceId` is present and a shared sheet exists; otherwise they fall back to the caller's personal sheet.
+
+New collaboration tools:
+
+- `create_shared_google_sheet`
+- `share_shared_google_sheet`
+- `get_shared_google_sheet`
 
 For OAuth deployments, configure the MCP client to use Google OAuth directly. The MCP client sends the resulting Google access token as `Authorization: Bearer <token>` to this server. The server validates the token with Google, uses the Google user ID as the spreadsheet owner key, and uses the same access token to create or update that user's Sheets file.
 
@@ -221,6 +250,9 @@ docker run --rm \
 - Use `cancel_expense` when a claimant needs to withdraw a mistaken record.
 - Use `query_expense_summary` for reporting.
 - When Sheets sync is enabled, let finance users use the MCP caller-specific spreadsheets as live detail views rather than the source of truth.
+- For multi-user collaboration, create the workspace shared sheet before asking another user to upload or review data in that workspace.
+- Prefer `create_shared_google_sheet` and `share_shared_google_sheet` over asking the agent to infer ad hoc sharing behavior.
+- When a request includes a `workspaceId`, prefer syncing query outputs into that workspace's shared sheet rather than a personal sheet.
 - Use `create_google_drive_folder` when the destination Drive folder does not exist yet.
 - Prefer `upload_google_drive_file_auto` so the server chooses the upload strategy instead of relying on the agent to guess.
 - Use `upload_google_drive_file` for smaller files that fit in a single tool call.

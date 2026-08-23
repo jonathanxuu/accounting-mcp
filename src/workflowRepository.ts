@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 
-import type { McpUserIdentity } from './sheetMappings.js';
+import { memberIdentityForUser, type McpUserIdentity } from './sheetMappings.js';
 import type {
   DeleteSavedViewInput,
   IngestSourceMaterialInput,
@@ -411,9 +411,17 @@ async function ensureOwnedCase(db: Queryable, accountingCaseId: number, actor: M
     SELECT id
     FROM accounting_cases
     WHERE id = $1
-      AND owner_user_key = $2
+      AND (
+        owner_user_key = $2
+        OR EXISTS (
+          SELECT 1
+          FROM shared_spreadsheet_members ssm
+          WHERE ssm.workspace_id = accounting_cases.workspace_id
+            AND (ssm.member_key = $2 OR ssm.member_identity = $3)
+        )
+      )
     `,
-    [accountingCaseId, actor.key],
+    [accountingCaseId, actor.key, memberIdentityForUser(actor)],
   );
 
   if (!result.rows[0]) {
@@ -435,9 +443,17 @@ async function ensureOwnedRecordInCase(
       ON ac.id = ar.accounting_case_id
     WHERE ar.id = $1
       AND ar.accounting_case_id = $2
-      AND ac.owner_user_key = $3
+      AND (
+        ac.owner_user_key = $3
+        OR EXISTS (
+          SELECT 1
+          FROM shared_spreadsheet_members ssm
+          WHERE ssm.workspace_id = ac.workspace_id
+            AND (ssm.member_key = $3 OR ssm.member_identity = $4)
+        )
+      )
     `,
-    [recordId, accountingCaseId, actor.key],
+    [recordId, accountingCaseId, actor.key, memberIdentityForUser(actor)],
   );
 
   if (!result.rows[0]) {
@@ -461,9 +477,17 @@ async function fetchOwnedRecordDetails(
       ON ac.id = ar.accounting_case_id
     WHERE ar.id = $1
       AND ar.accounting_case_id = $2
-      AND ac.owner_user_key = $3
+      AND (
+        ac.owner_user_key = $3
+        OR EXISTS (
+          SELECT 1
+          FROM shared_spreadsheet_members ssm
+          WHERE ssm.workspace_id = ac.workspace_id
+            AND (ssm.member_key = $3 OR ssm.member_identity = $4)
+        )
+      )
     `,
-    [recordId, accountingCaseId, actor.key],
+    [recordId, accountingCaseId, actor.key, memberIdentityForUser(actor)],
   );
 
   const row = result.rows[0];
@@ -780,9 +804,30 @@ function appendJsonbContainsNumberFilter(
   conditions.push(`${column} @> $${params.length}::jsonb`);
 }
 
+function appendWorkspaceAccessCondition(
+  conditions: string[],
+  params: unknown[],
+  actor: McpUserIdentity,
+  caseAlias: string,
+) {
+  params.push(actor.key);
+  const actorKeyParam = params.length;
+  params.push(memberIdentityForUser(actor));
+  const actorIdentityParam = params.length;
+  conditions.push(
+    `(${caseAlias}.owner_user_key = $${actorKeyParam} OR EXISTS (` +
+      `SELECT 1 FROM shared_spreadsheet_members ssm ` +
+      `WHERE ssm.workspace_id = ${caseAlias}.workspace_id ` +
+      `AND (ssm.member_key = $${actorKeyParam} OR ssm.member_identity = $${actorIdentityParam})` +
+      '))',
+  );
+}
+
 function buildRecordWhereClause(input: SearchAccountingRecordsInput, actor: McpUserIdentity) {
-  const conditions = ['ac.owner_user_key = $1'];
-  const params: unknown[] = [actor.key];
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  appendWorkspaceAccessCondition(conditions, params, actor, 'ac');
 
   appendFilter(conditions, params, 'ar.accounting_case_id =', input.accountingCaseId);
   appendFilter(conditions, params, 'ac.workspace_id =', input.workspaceId);
@@ -838,8 +883,10 @@ function buildRecordWhereClause(input: SearchAccountingRecordsInput, actor: McpU
 }
 
 function buildReviewWhereClause(input: ListReviewItemsInput, actor: McpUserIdentity) {
-  const conditions = ['ac.owner_user_key = $1'];
-  const params: unknown[] = [actor.key];
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  appendWorkspaceAccessCondition(conditions, params, actor, 'ac');
 
   appendFilter(conditions, params, 'ri.accounting_case_id =', input.accountingCaseId);
   appendFilter(conditions, params, 'ac.workspace_id =', input.workspaceId);
@@ -1092,7 +1139,15 @@ export class WorkflowRepository {
           FROM accounting_cases ac
           WHERE ar.id = $14
             AND ac.id = ar.accounting_case_id
-            AND ac.owner_user_key = $15
+            AND (
+              ac.owner_user_key = $15
+              OR EXISTS (
+                SELECT 1
+                FROM shared_spreadsheet_members ssm
+                WHERE ssm.workspace_id = ac.workspace_id
+                  AND (ssm.member_key = $15 OR ssm.member_identity = $16)
+              )
+            )
           RETURNING ar.*
           `,
           [
@@ -1111,6 +1166,7 @@ export class WorkflowRepository {
             now,
             input.id,
             actor.key,
+            memberIdentityForUser(actor),
           ],
         );
 
@@ -1447,7 +1503,15 @@ export class WorkflowRepository {
           FROM accounting_cases ac
           WHERE ri.id = $13
             AND ac.id = ri.accounting_case_id
-            AND ac.owner_user_key = $14
+            AND (
+              ac.owner_user_key = $14
+              OR EXISTS (
+                SELECT 1
+                FROM shared_spreadsheet_members ssm
+                WHERE ssm.workspace_id = ac.workspace_id
+                  AND (ssm.member_key = $14 OR ssm.member_identity = $15)
+              )
+            )
           RETURNING ri.*
           `,
           [
@@ -1465,6 +1529,7 @@ export class WorkflowRepository {
             now,
             input.id,
             actor.key,
+            memberIdentityForUser(actor),
           ],
         );
 
@@ -1779,7 +1844,15 @@ export class WorkflowRepository {
           FROM accounting_cases ac
           WHERE rl.id = $11
             AND ac.id = rl.accounting_case_id
-            AND ac.owner_user_key = $12
+            AND (
+              ac.owner_user_key = $12
+              OR EXISTS (
+                SELECT 1
+                FROM shared_spreadsheet_members ssm
+                WHERE ssm.workspace_id = ac.workspace_id
+                  AND (ssm.member_key = $12 OR ssm.member_identity = $13)
+              )
+            )
           RETURNING rl.*
           `,
           [
@@ -1795,6 +1868,7 @@ export class WorkflowRepository {
             now,
             input.id,
             actor.key,
+            memberIdentityForUser(actor),
           ],
         );
 
@@ -1875,8 +1949,10 @@ export class WorkflowRepository {
   }
 
   async listReconciliationLinks(input: ListReconciliationLinksInput, actor: McpUserIdentity) {
-    const conditions = ['ac.owner_user_key = $1'];
-    const params: unknown[] = [actor.key];
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    appendWorkspaceAccessCondition(conditions, params, actor, 'ac');
 
     appendFilter(conditions, params, 'rl.accounting_case_id =', input.accountingCaseId);
     appendFilter(conditions, params, 'rl.source_record_id =', input.sourceRecordId);
@@ -2003,6 +2079,34 @@ export class WorkflowRepository {
       },
       items: rowsResult.rows.map(fromReconciliationLinkSearchRow),
     };
+  }
+
+  async getAccountingCase(accountingCaseId: number, actor: McpUserIdentity) {
+    const result = await this.pool.query<AccountingCaseRow>(
+      `
+      SELECT *
+      FROM accounting_cases
+      WHERE id = $1
+        AND (
+          owner_user_key = $2
+          OR EXISTS (
+            SELECT 1
+            FROM shared_spreadsheet_members ssm
+            WHERE ssm.workspace_id = accounting_cases.workspace_id
+              AND (ssm.member_key = $2 OR ssm.member_identity = $3)
+          )
+        )
+      LIMIT 1
+      `,
+      [accountingCaseId, actor.key, memberIdentityForUser(actor)],
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error(`Accounting case ${accountingCaseId} was not found`);
+    }
+
+    return fromAccountingCaseRow(row);
   }
 
   async listSavedViews(input: ListSavedViewsInput, actor: McpUserIdentity) {

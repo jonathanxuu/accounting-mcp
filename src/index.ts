@@ -47,6 +47,13 @@ if (interruptedCreations > 0) {
   );
 }
 
+const interruptedSharedCreations = await spreadsheetRepository.resetInterruptedSharedCreations();
+if (interruptedSharedCreations > 0) {
+  console.warn(
+    `Reset ${interruptedSharedCreations} interrupted shared Google Sheets creation(s) left over from a previous run.`,
+  );
+}
+
 const sheetsSync = config.sheets.enabled
   ? new GoogleSheetsSync(config.sheets, spreadsheetRepository)
   : null;

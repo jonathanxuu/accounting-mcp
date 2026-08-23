@@ -314,6 +314,30 @@ export const createGoogleDriveFolderSchema = z.object({
   parentFolderId: driveFileIdSchema.optional().describe('Optional parent Google Drive folder id'),
 });
 
+export const sharedGoogleSheetRoleSchema = z.enum(['editor', 'viewer']);
+
+export const createSharedGoogleSheetSchema = z.object({
+  workspaceId: z.string().trim().min(1).max(100).describe('Workspace id that should share one Google Sheet'),
+  title: z.string().trim().min(1).max(255).optional().describe('Optional Google Sheet title'),
+  memberEmails: z
+    .array(z.string().trim().email().max(320))
+    .max(100)
+    .optional()
+    .describe('Optional additional member email addresses to share immediately'),
+});
+
+export const shareSharedGoogleSheetSchema = z.object({
+  workspaceId: z.string().trim().min(1).max(100).describe('Workspace id for the shared Google Sheet'),
+  memberEmail: z.string().trim().email().max(320).describe('Email address to grant access to'),
+  role: sharedGoogleSheetRoleSchema
+    .default('editor')
+    .describe('Whether the member can edit or only view the shared sheet'),
+});
+
+export const getSharedGoogleSheetSchema = z.object({
+  workspaceId: z.string().trim().min(1).max(100).describe('Workspace id for the shared Google Sheet'),
+});
+
 export const createGoogleDriveTextFileSchema = z.object({
   name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
   mimeType: z
@@ -413,6 +437,9 @@ export type ListGoogleDriveFilesInput = z.infer<typeof listGoogleDriveFilesSchem
 export type ReadGoogleDriveFileInput = z.infer<typeof readGoogleDriveFileSchema>;
 export type UpdateGoogleDriveFileInput = z.infer<typeof updateGoogleDriveFileSchema>;
 export type CreateGoogleDriveFolderInput = z.infer<typeof createGoogleDriveFolderSchema>;
+export type CreateSharedGoogleSheetInput = z.infer<typeof createSharedGoogleSheetSchema>;
+export type ShareSharedGoogleSheetInput = z.infer<typeof shareSharedGoogleSheetSchema>;
+export type GetSharedGoogleSheetInput = z.infer<typeof getSharedGoogleSheetSchema>;
 export type CreateGoogleDriveTextFileInput = z.infer<typeof createGoogleDriveTextFileSchema>;
 export type UploadGoogleDriveFileInput = z.infer<typeof uploadGoogleDriveFileSchema>;
 export type UploadGoogleDriveFileAutoInput = z.infer<typeof uploadGoogleDriveFileAutoSchema>;

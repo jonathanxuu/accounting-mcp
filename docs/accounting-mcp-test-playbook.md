@@ -23,6 +23,79 @@
 - 待处理问题
 - 保存查询视图
 - 查询结果同步到 Google Sheets
+- 同一个 workspace 共享一张 Google Sheet 给多人协作
+- Google Drive 文件夹创建、文件上传、文件移动
+
+## 新增协作测试主线
+
+如果你现在重点要验证“会计 A 创建共享表，客户 B 用自己的 OAuth 把材料写进同一张表”，建议优先走下面这条主线。
+
+### 步骤 1：A 创建 workspace 共享表
+
+先用 A 的账号在聊天里发送：
+
+```text
+请为 workspace acme-cn-2026-07 创建一张共享 Google Sheet，用来收集这个月结项目的所有材料和查询结果。
+```
+
+预期：
+
+- 会调用 `create_shared_google_sheet`
+- 返回 `workspaceId`、`spreadsheetId`、`spreadsheetUrl`
+
+### 步骤 2：A 把表共享给 B
+
+继续发送：
+
+```text
+把这张 workspace 表共享给 client-b@example.com，可编辑。
+```
+
+预期：
+
+- 会调用 `share_shared_google_sheet`
+- 返回最新成员列表
+
+### 步骤 3：A 创建账务任务
+
+发送：
+
+```text
+请在 workspace acme-cn-2026-07 下创建 ACME 中国 2026 年 7 月月结任务。
+```
+
+预期：
+
+- 会调用 `upsert_accounting_case`
+- 返回 case id
+
+### 步骤 4：B 用自己的账号上传或保存材料
+
+然后切换到 B 的 OAuth 账号，在聊天里发送：
+
+```text
+把这张发票保存到 workspace acme-cn-2026-07 刚才那个月结任务里。
+```
+
+预期：
+
+- 会调用 `ingest_source_material`
+- 如果这个 case 属于 `acme-cn-2026-07`，材料会自动写入共享表的 `Source Materials` 页签
+
+### 步骤 5：B 查询并同步结果
+
+继续发送：
+
+```text
+帮我查看这个 workspace 下的账务记录，并同步到 Google Sheets。
+```
+
+预期：
+
+- 会调用 `search_accounting_records`
+- 由于带着 `workspaceId`，结果会优先同步到共享 Google Sheet，而不是 B 自己的个人 sheet
+
+如果这 5 步都通了，说明这条共享协作链路已经成立。
 
 
 ## 最短测试路线
@@ -127,13 +200,15 @@
 推荐按这个顺序测：
 
 1. 员工报销
-2. 月结任务
-3. 原始材料
-4. 账务记录
-5. 对账
-6. 待处理问题
-7. 查询和 worksheet 同步
-8. 保存视图
+2. 创建共享 Google Sheet
+3. 共享给第二个用户
+4. 月结任务
+5. 原始材料
+6. 账务记录
+7. 对账
+8. 待处理问题
+9. 查询和 worksheet 同步
+10. 保存视图
 
 ---
 

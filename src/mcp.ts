@@ -10,9 +10,11 @@ import {
   addExpenseSchema,
   abortGoogleDriveUploadSchema,
   cancelExpenseSchema,
+  createSharedGoogleSheetSchema,
   createGoogleDriveFolderSchema,
   createGoogleDriveTextFileSchema,
   deleteSavedViewSchema,
+  getSharedGoogleSheetSchema,
   ingestSourceMaterialSchema,
   appendGoogleDriveUploadChunkSchema,
   listGoogleDriveFilesSchema,
@@ -24,6 +26,7 @@ import {
   readGoogleDriveFileSchema,
   runSavedViewSchema,
   searchAccountingRecordsSchema,
+  shareSharedGoogleSheetSchema,
   startGoogleDriveUploadSchema,
   summarySchema,
   uploadGoogleDriveFileAutoSchema,
@@ -53,6 +56,7 @@ async function syncWorksheetViewIfEnabled(
   user: McpUserIdentity | null,
   input:
     | {
+        workspaceId?: string;
         worksheetName: string;
         header: string[];
         rows: unknown[][];
@@ -83,6 +87,8 @@ async function syncWorksheetViewIfEnabled(
       spreadsheetUrl: null,
       worksheetName: input.worksheetName,
       rowCount: input.rows.length,
+      workspaceId: input.workspaceId ?? null,
+      syncMode: input.workspaceId ? 'shared' : 'personal',
     };
   }
 }
@@ -279,6 +285,108 @@ export function createAccountingServer(
     version: '0.1.0',
   });
   const driveFiles = new GoogleDriveFiles();
+
+  server.registerTool(
+    'create_shared_google_sheet',
+    {
+      title: 'Create Shared Google Sheet',
+      description:
+        'Create or reuse one shared Google Sheet for a workspace, owned by the current Google OAuth user, and optionally share it with additional member emails.',
+      inputSchema: createSharedGoogleSheetSchema.shape,
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = createSharedGoogleSheetSchema.parse(input);
+      const result = await sheetsSync.createSharedSpreadsheet(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Shared Google Sheet ready for workspace ${result.workspaceId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'share_shared_google_sheet',
+    {
+      title: 'Share Shared Google Sheet',
+      description:
+        'Grant a user access to an existing workspace shared Google Sheet and register them as a workspace collaborator.',
+      inputSchema: shareSharedGoogleSheetSchema.shape,
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = shareSharedGoogleSheetSchema.parse(input);
+      const result = await sheetsSync.shareSharedSpreadsheetWithMember(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Shared workspace ${result.workspaceId} with ${parsed.memberEmail}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_shared_google_sheet',
+    {
+      title: 'Get Shared Google Sheet',
+      description:
+        'Get the current shared Google Sheet and member list for a workspace if the current user has access.',
+      inputSchema: getSharedGoogleSheetSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+      },
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = getSharedGoogleSheetSchema.parse(input);
+      const result = await sheetsSync.getSharedSpreadsheetDetails(parsed.workspaceId, user);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Loaded shared Google Sheet for workspace ${result.workspaceId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
 
   server.registerTool(
     'list_google_drive_files',
@@ -675,19 +783,75 @@ export function createAccountingServer(
       const user = requireMcpUser(mcpUser);
       const parsed = ingestSourceMaterialSchema.parse(input);
       const saved = await workflowRepository.ingestSourceMaterial(parsed, user);
+      const accountingCase = await workflowRepository.getAccountingCase(saved.accountingCaseId, user);
+      let sheetSync: {
+        ok: boolean;
+        error: string | null;
+        spreadsheetId: string | null;
+        spreadsheetUrl: string | null;
+        worksheetName: string;
+        rowCount: number;
+        workspaceId: string | null;
+        syncMode: 'personal' | 'shared';
+      } | null = null;
+
+      if (sheetsSync) {
+        try {
+          const result = await sheetsSync.appendSourceMaterialRow(user, {
+            workspaceId: accountingCase.workspaceId,
+            accountingCaseId: saved.accountingCaseId,
+            sourceMaterialId: saved.id,
+            uploadedBy: user.label,
+            sourceType: saved.sourceType,
+            materialKind: saved.materialKind,
+            fileRef: saved.fileRef,
+            contentHash: saved.contentHash,
+            status: saved.status,
+            confidence: saved.confidence,
+            evidenceRefs: saved.evidenceRefs,
+            rawTextPreview: saved.rawText ? saved.rawText.slice(0, 500) : null,
+            createdAt: saved.createdAt,
+            updatedAt: saved.updatedAt,
+          });
+          sheetSync = {
+            ok: true,
+            error: null,
+            ...result,
+          };
+        } catch (error) {
+          console.error('Failed to sync source material to Google Sheets', error);
+          sheetSync = {
+            ok: false,
+            error: error instanceof Error ? error.message : 'Unknown Google Sheets sync error',
+            spreadsheetId: null,
+            spreadsheetUrl: null,
+            worksheetName: 'Source Materials',
+            rowCount: 1,
+            workspaceId: accountingCase.workspaceId,
+            syncMode: 'shared',
+          };
+        }
+      }
 
       return {
         content: [
           {
             type: 'text',
-            text: `Source material ${saved.id} saved for accounting case ${saved.accountingCaseId}.`,
+            text: sheetSync?.ok
+              ? `Source material ${saved.id} saved for accounting case ${saved.accountingCaseId} and synced to worksheet ${sheetSync.worksheetName}.`
+              : sheetSync?.error
+                ? `Source material ${saved.id} saved for accounting case ${saved.accountingCaseId}. Worksheet sync failed: ${sheetSync.error}`
+                : `Source material ${saved.id} saved for accounting case ${saved.accountingCaseId}.`,
           },
           {
             type: 'text',
             text: formatJson(saved),
           },
         ],
-        structuredContent: saved,
+        structuredContent: {
+          ...saved,
+          sheetSync,
+        },
       };
     },
   );
@@ -836,10 +1000,11 @@ export function createAccountingServer(
         sheetsSync,
         user,
         worksheetData
-          ? {
-              worksheetName: chooseWorksheetName(
-                parsed.worksheetName,
-                parsed.saveViewName,
+            ? {
+                workspaceId: parsed.workspaceId,
+                worksheetName: chooseWorksheetName(
+                  parsed.worksheetName,
+                  parsed.saveViewName,
                 'Accounting Records',
               ),
               ...worksheetData,
@@ -929,6 +1094,7 @@ export function createAccountingServer(
           user,
           worksheetData
             ? {
+                workspaceId: replayInput.workspaceId,
                 worksheetName: chooseWorksheetName(
                   replayInput.worksheetName,
                   savedView.name,
@@ -976,6 +1142,7 @@ export function createAccountingServer(
           user,
           worksheetData
             ? {
+                workspaceId: replayInput.workspaceId,
                 worksheetName: chooseWorksheetName(
                   replayInput.worksheetName,
                   savedView.name,
@@ -1065,6 +1232,7 @@ export function createAccountingServer(
         user,
         worksheetData
           ? {
+              workspaceId: parsed.workspaceId,
               worksheetName: chooseWorksheetName(
                 parsed.worksheetName,
                 parsed.saveViewName,

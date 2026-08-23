@@ -2,10 +2,17 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 
 import { google } from 'googleapis';
-import type { sheets_v4 } from 'googleapis';
+import type { drive_v3, sheets_v4 } from 'googleapis';
 
-import { UserSpreadsheetRepository } from './sheetMappings.js';
-import type { McpUserIdentity, NewUserSpreadsheet } from './sheetMappings.js';
+import { UserSpreadsheetRepository, identityEmail } from './sheetMappings.js';
+import type {
+  McpUserIdentity,
+  NewSharedSpreadsheet,
+  NewUserSpreadsheet,
+  SharedSpreadsheetAccess,
+  SharedSpreadsheetMember,
+  UserSpreadsheetMapping,
+} from './sheetMappings.js';
 
 type ExpenseRecord = {
   id: number;
@@ -34,11 +41,25 @@ type SheetsConfig = {
   serviceAccountKeyJson?: string;
 };
 
+type SpreadsheetTarget = Pick<UserSpreadsheetMapping, 'spreadsheetId' | 'spreadsheetUrl' | 'title'>;
+
 export type WorksheetSyncResult = {
   spreadsheetId: string;
   spreadsheetUrl: string | null;
   worksheetName: string;
   rowCount: number;
+  workspaceId: string | null;
+  syncMode: 'personal' | 'shared';
+};
+
+export type SharedSpreadsheetResult = {
+  workspaceId: string;
+  spreadsheetId: string;
+  spreadsheetUrl: string | null;
+  title: string;
+  ownerUserKey: string;
+  ownerUserLabel: string;
+  members: SharedSpreadsheetMember[];
 };
 
 const HEADER = [
@@ -56,6 +77,24 @@ const HEADER = [
   'cancelled_at',
   'cancelled_by',
   'cancellation_reason',
+  'created_at',
+  'updated_at',
+];
+
+const SOURCE_MATERIALS_SHEET_NAME = 'Source Materials';
+const SOURCE_MATERIALS_HEADER = [
+  'source_material_id',
+  'accounting_case_id',
+  'workspace_id',
+  'uploaded_by',
+  'source_type',
+  'material_kind',
+  'file_ref',
+  'content_hash',
+  'status',
+  'confidence',
+  'evidence_refs',
+  'raw_text_preview',
   'created_at',
   'updated_at',
 ];
@@ -96,12 +135,33 @@ function buildUserSpreadsheetTitle(baseSheetName: string, user: McpUserIdentity)
   );
 }
 
+function buildSharedSpreadsheetTitle(
+  baseSheetName: string,
+  workspaceId: string,
+  explicitTitle?: string,
+): string {
+  const baseTitle = sanitizeSheetTitle(explicitTitle || baseSheetName) || 'Expenses';
+  const workspaceTitle = sanitizeSheetTitle(workspaceId) || identityHash(workspaceId);
+  return (
+    truncateTitle(`${baseTitle} - Shared - ${workspaceTitle}`, MAX_SPREADSHEET_TITLE_LENGTH) ||
+    `Expenses - Shared - ${identityHash(workspaceId)}`
+  );
+}
+
 function a1Range(sheetName: string, range: string): string {
   return `'${sheetName.replace(/'/g, "''")}'!${range}`;
 }
 
 function isDuplicateSheetTitleError(error: unknown): boolean {
   return error instanceof Error && /already exists/i.test(error.message);
+}
+
+function isDuplicatePermissionError(error: unknown): boolean {
+  return error instanceof Error && /already has permission|duplicate/i.test(error.message);
+}
+
+function drivePermissionRole(role: 'editor' | 'viewer'): 'writer' | 'reader' {
+  return role === 'editor' ? 'writer' : 'reader';
 }
 
 function toRow(expense: ExpenseRecord): string[] {
@@ -195,6 +255,19 @@ export class GoogleSheetsSync {
     return google.sheets({ version: 'v4', auth });
   }
 
+  private getUserDriveApi(user: McpUserIdentity): drive_v3.Drive {
+    if (!user.googleAccessToken) {
+      throw new Error('Google Drive sharing requires a user Google access token');
+    }
+
+    const auth = new google.auth.OAuth2();
+    auth.setCredentials({
+      access_token: user.googleAccessToken,
+    });
+
+    return google.drive({ version: 'v3', auth });
+  }
+
   private async getSheetsApi(user: McpUserIdentity): Promise<sheets_v4.Sheets | null> {
     if (this.useUserGoogleAuth) {
       return this.getUserSheetsApi(user);
@@ -203,7 +276,62 @@ export class GoogleSheetsSync {
     return this.sheetsApiPromise;
   }
 
-  async syncExpense(expense: ExpenseRecord, user: McpUserIdentity): Promise<void> {
+  private async resolveSpreadsheetTarget(
+    sheets: sheets_v4.Sheets,
+    user: McpUserIdentity,
+    workspaceId?: string,
+  ): Promise<SpreadsheetTarget & { workspaceId: string | null; syncMode: 'personal' | 'shared' }> {
+    if (workspaceId) {
+      const shared = await this.spreadsheetRepository.getSharedSpreadsheet(workspaceId);
+      if (shared) {
+        const access = await this.requireSharedSpreadsheetAccess(workspaceId, user, 'viewer');
+        return {
+          spreadsheetId: access.spreadsheetId,
+          spreadsheetUrl: access.spreadsheetUrl,
+          title: access.title,
+          workspaceId,
+          syncMode: 'shared',
+        };
+      }
+    }
+
+    const personal = await this.spreadsheetRepository.getOrCreateForUser(
+      user,
+      () => this.createUserSpreadsheet(sheets, user),
+    );
+    return {
+      spreadsheetId: personal.spreadsheetId,
+      spreadsheetUrl: personal.spreadsheetUrl,
+      title: personal.title,
+      workspaceId: null,
+      syncMode: 'personal',
+    };
+  }
+
+  private async requireSharedSpreadsheetAccess(
+    workspaceId: string,
+    user: McpUserIdentity,
+    minimumRole: 'viewer' | 'editor',
+  ): Promise<SharedSpreadsheetAccess> {
+    const access = await this.spreadsheetRepository.getSharedSpreadsheetForUser(workspaceId, user);
+    if (!access) {
+      throw new Error(`User ${user.label} does not have access to shared spreadsheet for workspace ${workspaceId}`);
+    }
+
+    if (minimumRole === 'editor' && access.role === 'viewer') {
+      throw new Error(`User ${user.label} has viewer-only access to shared spreadsheet for workspace ${workspaceId}`);
+    }
+
+    return access;
+  }
+
+  async syncExpense(
+    expense: ExpenseRecord,
+    user: McpUserIdentity,
+    input?: {
+      workspaceId?: string;
+    },
+  ): Promise<void> {
     if (!this.enabled) {
       return;
     }
@@ -214,14 +342,11 @@ export class GoogleSheetsSync {
       return;
     }
 
-    const spreadsheet = await this.spreadsheetRepository.getOrCreateForUser(
-      user,
-      () => this.createUserSpreadsheet(sheets, user),
-    );
+    const spreadsheet = await this.resolveSpreadsheetTarget(sheets, user, input?.workspaceId);
     const sheetRange = a1Range(this.sheetName, 'A:P');
 
     await this.ensureDetailSheet(sheets, spreadsheet.spreadsheetId);
-    await this.ensureHeader(sheets, spreadsheet.spreadsheetId);
+    await this.ensureHeader(sheets, spreadsheet.spreadsheetId, this.sheetName, HEADER);
 
     const existing = await sheets.spreadsheets.values.get({
       spreadsheetId: spreadsheet.spreadsheetId,
@@ -257,6 +382,7 @@ export class GoogleSheetsSync {
   async syncWorksheetView(
     user: McpUserIdentity,
     input: {
+      workspaceId?: string;
       worksheetName: string;
       header: string[];
       rows: unknown[][];
@@ -271,11 +397,7 @@ export class GoogleSheetsSync {
       throw new Error('Google Sheets API is not available');
     }
 
-    const spreadsheet = await this.spreadsheetRepository.getOrCreateForUser(
-      user,
-      () => this.createUserSpreadsheet(sheets, user),
-    );
-
+    const spreadsheet = await this.resolveSpreadsheetTarget(sheets, user, input.workspaceId);
     const worksheetName = buildDetailSheetName(input.worksheetName);
     await this.ensureNamedSheet(sheets, spreadsheet.spreadsheetId, worksheetName);
 
@@ -298,7 +420,193 @@ export class GoogleSheetsSync {
       spreadsheetUrl: spreadsheet.spreadsheetUrl,
       worksheetName,
       rowCount: input.rows.length,
+      workspaceId: spreadsheet.workspaceId,
+      syncMode: spreadsheet.syncMode,
     };
+  }
+
+  async appendSourceMaterialRow(
+    user: McpUserIdentity,
+    input: {
+      workspaceId: string;
+      accountingCaseId: number;
+      sourceMaterialId: number;
+      uploadedBy: string;
+      sourceType: string;
+      materialKind: string;
+      fileRef: string | null;
+      contentHash: string | null;
+      status: string;
+      confidence: number | null;
+      evidenceRefs: string[];
+      rawTextPreview: string | null;
+      createdAt: string;
+      updatedAt: string;
+    },
+  ): Promise<WorksheetSyncResult> {
+    if (!this.enabled) {
+      throw new Error('Google Sheets sync is not enabled');
+    }
+
+    const sheets = await this.getSheetsApi(user);
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const spreadsheet = await this.resolveSpreadsheetTarget(sheets, user, input.workspaceId);
+    await this.ensureNamedSheet(sheets, spreadsheet.spreadsheetId, SOURCE_MATERIALS_SHEET_NAME);
+    await this.ensureHeader(
+      sheets,
+      spreadsheet.spreadsheetId,
+      SOURCE_MATERIALS_SHEET_NAME,
+      SOURCE_MATERIALS_HEADER,
+    );
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: spreadsheet.spreadsheetId,
+      range: a1Range(SOURCE_MATERIALS_SHEET_NAME, 'A:N'),
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [
+          [
+            String(input.sourceMaterialId),
+            String(input.accountingCaseId),
+            input.workspaceId,
+            input.uploadedBy,
+            input.sourceType,
+            input.materialKind,
+            input.fileRef ?? '',
+            input.contentHash ?? '',
+            input.status,
+            input.confidence ?? '',
+            input.evidenceRefs.join(', '),
+            input.rawTextPreview ?? '',
+            input.createdAt,
+            input.updatedAt,
+          ],
+        ],
+      },
+    });
+
+    return {
+      spreadsheetId: spreadsheet.spreadsheetId,
+      spreadsheetUrl: spreadsheet.spreadsheetUrl,
+      worksheetName: SOURCE_MATERIALS_SHEET_NAME,
+      rowCount: 1,
+      workspaceId: spreadsheet.workspaceId,
+      syncMode: spreadsheet.syncMode,
+    };
+  }
+
+  async createSharedSpreadsheet(
+    user: McpUserIdentity,
+    input: {
+      workspaceId: string;
+      title?: string;
+      memberEmails?: string[];
+    },
+  ): Promise<SharedSpreadsheetResult> {
+    if (!this.enabled) {
+      throw new Error('Google Sheets sync is not enabled');
+    }
+
+    const sheets = await this.getSheetsApi(user);
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const spreadsheet = await this.spreadsheetRepository.getOrCreateForWorkspace(
+      input.workspaceId,
+      user,
+      () => this.createWorkspaceSpreadsheet(sheets, user, input.workspaceId, input.title),
+    );
+
+    for (const email of input.memberEmails ?? []) {
+      const normalizedEmail = identityEmail(email);
+      const normalizedUserEmail = identityEmail(user.label);
+      if (!normalizedEmail || normalizedEmail === normalizedUserEmail) {
+        continue;
+      }
+
+      await this.shareSharedSpreadsheetWithMember(user, {
+        workspaceId: input.workspaceId,
+        memberEmail: normalizedEmail,
+        role: 'editor',
+      });
+    }
+
+    return {
+      workspaceId: spreadsheet.workspaceId,
+      spreadsheetId: spreadsheet.spreadsheetId,
+      spreadsheetUrl: spreadsheet.spreadsheetUrl,
+      title: spreadsheet.title,
+      ownerUserKey: spreadsheet.ownerUserKey,
+      ownerUserLabel: spreadsheet.ownerUserLabel,
+      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(input.workspaceId),
+    };
+  }
+
+  async shareSharedSpreadsheetWithMember(
+    user: McpUserIdentity,
+    input: {
+      workspaceId: string;
+      memberEmail: string;
+      role: 'editor' | 'viewer';
+    },
+  ): Promise<SharedSpreadsheetResult> {
+    const access = await this.requireSharedSpreadsheetAccess(input.workspaceId, user, 'editor');
+    const drive = this.getUserDriveApi(user);
+    await this.ensureDrivePermission(drive, access.spreadsheetId, input.memberEmail, input.role);
+
+    await this.spreadsheetRepository.addSharedSpreadsheetMember({
+      workspaceId: input.workspaceId,
+      memberIdentity: input.memberEmail.toLowerCase(),
+      memberLabel: input.memberEmail,
+      memberEmail: input.memberEmail.toLowerCase(),
+      role: input.role,
+    });
+
+    return this.getSharedSpreadsheetDetails(input.workspaceId, user);
+  }
+
+  async getSharedSpreadsheetDetails(
+    workspaceId: string,
+    user: McpUserIdentity,
+  ): Promise<SharedSpreadsheetResult> {
+    const access = await this.requireSharedSpreadsheetAccess(workspaceId, user, 'viewer');
+    return {
+      workspaceId: access.workspaceId,
+      spreadsheetId: access.spreadsheetId,
+      spreadsheetUrl: access.spreadsheetUrl,
+      title: access.title,
+      ownerUserKey: access.ownerUserKey,
+      ownerUserLabel: access.ownerUserLabel,
+      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(workspaceId),
+    };
+  }
+
+  private async ensureDrivePermission(
+    drive: drive_v3.Drive,
+    fileId: string,
+    memberEmail: string,
+    role: 'editor' | 'viewer',
+  ) {
+    try {
+      await drive.permissions.create({
+        fileId,
+        sendNotificationEmail: false,
+        requestBody: {
+          type: 'user',
+          role: drivePermissionRole(role),
+          emailAddress: memberEmail,
+        },
+      });
+    } catch (error) {
+      if (!isDuplicatePermissionError(error)) {
+        throw error;
+      }
+    }
   }
 
   private async createUserSpreadsheet(
@@ -325,6 +633,48 @@ export class GoogleSheetsSync {
 
     if (!spreadsheetId) {
       throw new Error(`Google Sheets did not return a spreadsheet id for MCP user ${user.key}`);
+    }
+
+    return {
+      spreadsheetId,
+      spreadsheetUrl: created.data.spreadsheetUrl ?? null,
+      title,
+    };
+  }
+
+  private async createWorkspaceSpreadsheet(
+    sheets: sheets_v4.Sheets,
+    user: McpUserIdentity,
+    workspaceId: string,
+    explicitTitle?: string,
+  ): Promise<NewSharedSpreadsheet> {
+    const title = buildSharedSpreadsheetTitle(this.sheetName, workspaceId, explicitTitle);
+    const created = await sheets.spreadsheets.create({
+      requestBody: {
+        properties: {
+          title,
+        },
+        sheets: [
+          {
+            properties: {
+              title: this.sheetName,
+            },
+          },
+          {
+            properties: {
+              title: SOURCE_MATERIALS_SHEET_NAME,
+            },
+          },
+        ],
+      },
+      fields: 'spreadsheetId,spreadsheetUrl',
+    });
+    const spreadsheetId = created.data.spreadsheetId;
+
+    if (!spreadsheetId) {
+      throw new Error(
+        `Google Sheets did not return a spreadsheet id for shared workspace ${workspaceId} created by ${user.key}`,
+      );
     }
 
     return {
@@ -387,14 +737,20 @@ export class GoogleSheetsSync {
     this.knownDetailSheets.add(cacheKey);
   }
 
-  private async ensureHeader(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
+  private async ensureHeader(
+    sheets: sheets_v4.Sheets,
+    spreadsheetId: string,
+    worksheetName: string,
+    headerValues: string[],
+  ): Promise<void> {
+    const range = a1Range(worksheetName, `A1:${String.fromCharCode(64 + headerValues.length)}1`);
     const existing = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: a1Range(this.sheetName, 'A1:P1'),
+      range,
     });
 
     const header = existing.data.values?.[0] ?? [];
-    const missingHeader = HEADER.some((value, index) => header[index] !== value);
+    const missingHeader = headerValues.some((value, index) => header[index] !== value);
 
     if (!missingHeader) {
       return;
@@ -402,9 +758,9 @@ export class GoogleSheetsSync {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: a1Range(this.sheetName, 'A1:P1'),
+      range,
       valueInputOption: 'RAW',
-      requestBody: { values: [HEADER] },
+      requestBody: { values: [headerValues] },
     });
   }
 }

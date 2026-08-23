@@ -6,7 +6,9 @@ export function createPool(connectionString: string): Pool {
     max: 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
-    ssl: connectionString.includes('sslmode=disable') ? false : undefined,
+    ssl: connectionString.includes('sslmode=disable')
+      ? false
+      : { rejectUnauthorized: false },
   });
 }
 
@@ -59,6 +61,38 @@ export async function initializeDatabase(pool: Pool): Promise<void> {
     ALTER TABLE mcp_user_spreadsheets
       ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready',
       ADD COLUMN IF NOT EXISTS last_error TEXT;
+
+    CREATE TABLE IF NOT EXISTS shared_spreadsheets (
+      workspace_id TEXT PRIMARY KEY,
+      owner_user_key TEXT NOT NULL,
+      owner_user_label TEXT NOT NULL,
+      spreadsheet_id TEXT,
+      spreadsheet_url TEXT,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ready',
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS shared_spreadsheet_members (
+      workspace_id TEXT NOT NULL REFERENCES shared_spreadsheets(workspace_id) ON DELETE CASCADE,
+      member_identity TEXT NOT NULL,
+      member_key TEXT,
+      member_label TEXT NOT NULL,
+      member_email TEXT,
+      role TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (workspace_id, member_identity)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shared_spreadsheets_owner_user_key
+      ON shared_spreadsheets (owner_user_key);
+    CREATE INDEX IF NOT EXISTS idx_shared_spreadsheet_members_workspace_id
+      ON shared_spreadsheet_members (workspace_id);
+    CREATE INDEX IF NOT EXISTS idx_shared_spreadsheet_members_member_identity
+      ON shared_spreadsheet_members (member_identity);
 
     CREATE TABLE IF NOT EXISTS accounting_cases (
       id BIGSERIAL PRIMARY KEY,
