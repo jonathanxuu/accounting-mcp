@@ -315,6 +315,12 @@ export const createGoogleDriveFolderSchema = z.object({
 });
 
 export const sharedGoogleSheetRoleSchema = z.enum(['editor', 'viewer']);
+const googleSpreadsheetUrlSchema = z
+  .string()
+  .trim()
+  .url()
+  .max(2000)
+  .describe('Google Sheets URL such as https://docs.google.com/spreadsheets/d/.../edit');
 
 export const createSharedGoogleSheetSchema = z.object({
   workspaceId: z.string().trim().min(1).max(100).describe('Workspace id that should share one Google Sheet'),
@@ -326,17 +332,41 @@ export const createSharedGoogleSheetSchema = z.object({
     .describe('Optional additional member email addresses to share immediately'),
 });
 
-export const shareSharedGoogleSheetSchema = z.object({
-  workspaceId: z.string().trim().min(1).max(100).describe('Workspace id for the shared Google Sheet'),
-  memberEmail: z.string().trim().email().max(320).describe('Email address to grant access to'),
-  role: sharedGoogleSheetRoleSchema
-    .default('editor')
-    .describe('Whether the member can edit or only view the shared sheet'),
-});
+export const shareSharedGoogleSheetSchema = z
+  .object({
+    workspaceId: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe('Workspace id for the shared Google Sheet'),
+    spreadsheetUrl: googleSpreadsheetUrlSchema.optional(),
+    memberEmail: z.string().trim().email().max(320).describe('Email address to grant access to'),
+    role: sharedGoogleSheetRoleSchema
+      .default('editor')
+      .describe('Whether the member can edit or only view the shared sheet'),
+  })
+  .refine((value) => value.workspaceId || value.spreadsheetUrl, {
+    message: 'Either workspaceId or spreadsheetUrl is required',
+    path: ['workspaceId'],
+  });
 
-export const getSharedGoogleSheetSchema = z.object({
-  workspaceId: z.string().trim().min(1).max(100).describe('Workspace id for the shared Google Sheet'),
-});
+export const getSharedGoogleSheetSchema = z
+  .object({
+    workspaceId: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe('Workspace id for the shared Google Sheet'),
+    spreadsheetUrl: googleSpreadsheetUrlSchema.optional(),
+  })
+  .refine((value) => value.workspaceId || value.spreadsheetUrl, {
+    message: 'Either workspaceId or spreadsheetUrl is required',
+    path: ['workspaceId'],
+  });
 
 export const createGoogleDriveTextFileSchema = z.object({
   name: z.string().trim().min(1).max(255).describe('Google Drive file name'),

@@ -324,7 +324,7 @@ export function createAccountingServer(
     {
       title: 'Share Shared Google Sheet',
       description:
-        'Grant a user access to an existing workspace shared Google Sheet and register them as a workspace collaborator.',
+        'Grant a user access to an existing workspace shared Google Sheet and register them as a workspace collaborator. You can identify the shared sheet by workspaceId or by the Google Sheets URL.',
       inputSchema: shareSharedGoogleSheetSchema.shape,
     },
     async (input) => {
@@ -357,7 +357,7 @@ export function createAccountingServer(
     {
       title: 'Get Shared Google Sheet',
       description:
-        'Get the current shared Google Sheet and member list for a workspace if the current user has access.',
+        'Get the current shared Google Sheet and member list if the current user has access. You can identify the shared sheet by workspaceId or by the Google Sheets URL.',
       inputSchema: getSharedGoogleSheetSchema.shape,
       annotations: {
         readOnlyHint: true,
@@ -370,7 +370,7 @@ export function createAccountingServer(
 
       const user = requireMcpUser(mcpUser);
       const parsed = getSharedGoogleSheetSchema.parse(input);
-      const result = await sheetsSync.getSharedSpreadsheetDetails(parsed.workspaceId, user);
+      const result = await sheetsSync.getSharedSpreadsheetDetails(parsed, user);
 
       return {
         content: [

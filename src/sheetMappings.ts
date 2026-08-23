@@ -259,6 +259,24 @@ export class UserSpreadsheetRepository {
     return row ? fromSharedRow(row) : null;
   }
 
+  async getSharedSpreadsheetBySpreadsheetId(
+    spreadsheetId: string,
+  ): Promise<SharedSpreadsheetMapping | null> {
+    const result = await this.pool.query<SharedSpreadsheetRow>(
+      `
+      SELECT *
+      FROM shared_spreadsheets
+      WHERE spreadsheet_id = $1
+        AND status = 'ready'
+      LIMIT 1
+      `,
+      [spreadsheetId],
+    );
+
+    const row = result.rows[0];
+    return row ? fromSharedRow(row) : null;
+  }
+
   async getSharedSpreadsheetForUser(
     workspaceId: string,
     user: McpUserIdentity,
@@ -298,6 +316,18 @@ export class UserSpreadsheetRepository {
       role: member.role,
       memberIdentity: member.member_identity,
     };
+  }
+
+  async getSharedSpreadsheetForUserBySpreadsheetId(
+    spreadsheetId: string,
+    user: McpUserIdentity,
+  ): Promise<SharedSpreadsheetAccess | null> {
+    const shared = await this.getSharedSpreadsheetBySpreadsheetId(spreadsheetId);
+    if (!shared) {
+      return null;
+    }
+
+    return this.getSharedSpreadsheetForUser(shared.workspaceId, user);
   }
 
   async listSharedSpreadsheetMembers(workspaceId: string): Promise<SharedSpreadsheetMember[]> {

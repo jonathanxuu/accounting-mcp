@@ -164,6 +164,21 @@ function drivePermissionRole(role: 'editor' | 'viewer'): 'writer' | 'reader' {
   return role === 'editor' ? 'writer' : 'reader';
 }
 
+function parseSpreadsheetIdFromUrl(spreadsheetUrl: string): string | null {
+  try {
+    const url = new URL(spreadsheetUrl);
+    const match = url.pathname.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+
+    if (match?.[1]) {
+      return match[1];
+    }
+
+    return url.searchParams.get('id');
+  } catch {
+    return null;
+  }
+}
+
 function toRow(expense: ExpenseRecord): string[] {
   return [
     String(expense.id),
@@ -320,6 +335,47 @@ export class GoogleSheetsSync {
 
     if (minimumRole === 'editor' && access.role === 'viewer') {
       throw new Error(`User ${user.label} has viewer-only access to shared spreadsheet for workspace ${workspaceId}`);
+    }
+
+    return access;
+  }
+
+  private async requireSharedSpreadsheetAccessByLocator(
+    input: {
+      workspaceId?: string;
+      spreadsheetUrl?: string;
+    },
+    user: McpUserIdentity,
+    minimumRole: 'viewer' | 'editor',
+  ): Promise<SharedSpreadsheetAccess> {
+    if (input.workspaceId) {
+      return this.requireSharedSpreadsheetAccess(input.workspaceId, user, minimumRole);
+    }
+
+    const spreadsheetUrl = input.spreadsheetUrl?.trim();
+    if (!spreadsheetUrl) {
+      throw new Error('Either workspaceId or spreadsheetUrl is required');
+    }
+
+    const spreadsheetId = parseSpreadsheetIdFromUrl(spreadsheetUrl);
+    if (!spreadsheetId) {
+      throw new Error(`Could not parse spreadsheet id from URL: ${spreadsheetUrl}`);
+    }
+
+    const access = await this.spreadsheetRepository.getSharedSpreadsheetForUserBySpreadsheetId(
+      spreadsheetId,
+      user,
+    );
+    if (!access) {
+      throw new Error(
+        `User ${user.label} does not have access to shared spreadsheet ${spreadsheetId}`,
+      );
+    }
+
+    if (minimumRole === 'editor' && access.role === 'viewer') {
+      throw new Error(
+        `User ${user.label} has viewer-only access to shared spreadsheet ${spreadsheetId}`,
+      );
     }
 
     return access;
@@ -550,31 +606,35 @@ export class GoogleSheetsSync {
   async shareSharedSpreadsheetWithMember(
     user: McpUserIdentity,
     input: {
-      workspaceId: string;
+      workspaceId?: string;
+      spreadsheetUrl?: string;
       memberEmail: string;
       role: 'editor' | 'viewer';
     },
   ): Promise<SharedSpreadsheetResult> {
-    const access = await this.requireSharedSpreadsheetAccess(input.workspaceId, user, 'editor');
+    const access = await this.requireSharedSpreadsheetAccessByLocator(input, user, 'editor');
     const drive = this.getUserDriveApi(user);
     await this.ensureDrivePermission(drive, access.spreadsheetId, input.memberEmail, input.role);
 
     await this.spreadsheetRepository.addSharedSpreadsheetMember({
-      workspaceId: input.workspaceId,
+      workspaceId: access.workspaceId,
       memberIdentity: input.memberEmail.toLowerCase(),
       memberLabel: input.memberEmail,
       memberEmail: input.memberEmail.toLowerCase(),
       role: input.role,
     });
 
-    return this.getSharedSpreadsheetDetails(input.workspaceId, user);
+    return this.getSharedSpreadsheetDetails({ workspaceId: access.workspaceId }, user);
   }
 
   async getSharedSpreadsheetDetails(
-    workspaceId: string,
+    input: {
+      workspaceId?: string;
+      spreadsheetUrl?: string;
+    },
     user: McpUserIdentity,
   ): Promise<SharedSpreadsheetResult> {
-    const access = await this.requireSharedSpreadsheetAccess(workspaceId, user, 'viewer');
+    const access = await this.requireSharedSpreadsheetAccessByLocator(input, user, 'viewer');
     return {
       workspaceId: access.workspaceId,
       spreadsheetId: access.spreadsheetId,
@@ -582,7 +642,7 @@ export class GoogleSheetsSync {
       title: access.title,
       ownerUserKey: access.ownerUserKey,
       ownerUserLabel: access.ownerUserLabel,
-      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(workspaceId),
+      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(access.workspaceId),
     };
   }
 
