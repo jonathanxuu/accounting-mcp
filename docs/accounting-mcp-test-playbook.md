@@ -24,6 +24,7 @@
 - 保存查询视图
 - 查询结果同步到 Google Sheets
 - 同一个 workspace 共享一张 Google Sheet 给多人协作
+- 直接读取 shared Google Sheet 的原始 worksheet 单元格
 - Google Drive 文件夹创建、文件上传、文件移动
 
 ## 新增协作测试主线
@@ -96,6 +97,20 @@
 - 由于带着 `workspaceId`，结果会优先同步到共享 Google Sheet，而不是 B 自己的个人 sheet
 
 如果这 5 步都通了，说明这条共享协作链路已经成立。
+
+### 步骤 6：直接查看共享表里还没结构化的原始材料
+
+如果你想验证“Agent 不查结构化记录，直接查 shared sheet 原始单元格”，可以继续发送：
+
+```text
+请列出这个 shared Google Sheet 里有哪些 worksheet tab，然后读取 Source Materials 这个页签前 20 行给我看。
+```
+
+预期：
+
+- 先调用 `list_shared_google_sheet_tabs`
+- 再调用 `read_shared_google_sheet_cells`
+- 能直接读到共享表中的原始材料单元格，即使这些材料还没转成结构化记录
 
 
 ## 最短测试路线

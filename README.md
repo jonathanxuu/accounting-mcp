@@ -131,6 +131,14 @@ New collaboration tools:
 - `create_shared_google_sheet`
 - `share_shared_google_sheet`
 - `get_shared_google_sheet`
+- `list_shared_google_sheet_tabs`
+- `read_shared_google_sheet_cells`
+
+Raw shared-sheet inspection behavior:
+
+- `share_shared_google_sheet` and `get_shared_google_sheet` can identify the target sheet by `workspaceId` or by the Google Sheets URL.
+- `list_shared_google_sheet_tabs` lets the agent discover available worksheet tabs such as `Source Materials`.
+- `read_shared_google_sheet_cells` lets the agent read raw worksheet ranges before those materials are converted into structured accounting records.
 
 For OAuth deployments, configure the MCP client to use Google OAuth directly. The MCP client sends the resulting Google access token as `Authorization: Bearer <token>` to this server. The server validates the token with Google, uses the Google user ID as the spreadsheet owner key, and uses the same access token to create or update that user's Sheets file.
 

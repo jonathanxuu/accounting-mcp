@@ -17,6 +17,7 @@ import {
   getSharedGoogleSheetSchema,
   ingestSourceMaterialSchema,
   appendGoogleDriveUploadChunkSchema,
+  listSharedGoogleSheetTabsSchema,
   listGoogleDriveFilesSchema,
   listExpensesSchema,
   listReconciliationLinksSchema,
@@ -26,6 +27,7 @@ import {
   readGoogleDriveFileSchema,
   runSavedViewSchema,
   searchAccountingRecordsSchema,
+  readSharedGoogleSheetCellsSchema,
   shareSharedGoogleSheetSchema,
   startGoogleDriveUploadSchema,
   summarySchema,
@@ -377,6 +379,78 @@ export function createAccountingServer(
           {
             type: 'text',
             text: `Loaded shared Google Sheet for workspace ${result.workspaceId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'list_shared_google_sheet_tabs',
+    {
+      title: 'List Shared Google Sheet Tabs',
+      description:
+        'List worksheet tabs for a shared Google Sheet so an agent can inspect raw collaboration tabs before records are structured.',
+      inputSchema: listSharedGoogleSheetTabsSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+      },
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = listSharedGoogleSheetTabsSchema.parse(input);
+      const result = await sheetsSync.listSharedSpreadsheetTabs(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Loaded ${result.tabs.length} worksheet tabs for workspace ${result.workspaceId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'read_shared_google_sheet_cells',
+    {
+      title: 'Read Shared Google Sheet Cells',
+      description:
+        'Read raw cell values from a shared Google Sheet worksheet. Use this when the user wants to inspect materials that are still only in the shared sheet and have not yet been converted into structured accounting records.',
+      inputSchema: readSharedGoogleSheetCellsSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+      },
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = readSharedGoogleSheetCellsSchema.parse(input);
+      const result = await sheetsSync.readSharedSpreadsheetCells(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Read ${result.rowCount} row(s) from worksheet ${result.worksheetName} in workspace ${result.workspaceId}.`,
           },
           {
             type: 'text',
@@ -1438,19 +1512,25 @@ export function createAccountingServer(
               '13. list_saved_views：查看已保存查询视图。',
               '14. run_saved_view：重新执行已保存视图，并可同步到 worksheet。',
               '15. delete_saved_view：删除不再需要的已保存视图。',
-              '16. list_google_drive_files：查看当前 Google 用户可访问的 Drive 文件。',
-              '17. read_google_drive_file：读取 Google Docs 或文本类 Drive 文件内容。',
-              '18. update_google_drive_file：覆盖更新 Google Docs 或文本类 Drive 文件内容。',
-              '19. move_google_drive_file：把 Drive 文件移动到指定文件夹。',
-              '20. create_google_drive_folder：在 Drive 中创建文件夹。',
-              '21. create_google_drive_text_file：仅用于创建 Google Docs 或文本类文件，不要用于 PDF、图片、Office 文档或压缩包。',
-              '22. upload_google_drive_file_auto：PDF、图片、Office 文档、压缩包等文件优先使用这个统一上传入口，服务端会自动选择上传策略。',
-              '23. upload_google_drive_file：单次上传较小文件。',
-              '24. start_google_drive_upload：开始大文件分片上传会话。',
-              '25. append_google_drive_upload_chunk：向上传会话追加一个分片。',
-              '26. finish_google_drive_upload：完成分片上传并写入 Drive。',
-              '27. abort_google_drive_upload：取消分片上传并清理临时文件。',
+              '16. create_shared_google_sheet：为 workspace 创建或复用共享 Google Sheet。',
+              '17. share_shared_google_sheet：按 workspaceId 或 Google Sheet URL 把共享表授权给协作者。',
+              '18. get_shared_google_sheet：按 workspaceId 或 Google Sheet URL 查看共享表信息和成员。',
+              '19. list_shared_google_sheet_tabs：查看共享表有哪些 worksheet tab。',
+              '20. read_shared_google_sheet_cells：直接读取共享表原始单元格，适合查询尚未转成结构化记录的材料。',
+              '21. list_google_drive_files：查看当前 Google 用户可访问的 Drive 文件。',
+              '22. read_google_drive_file：读取 Google Docs 或文本类 Drive 文件内容。',
+              '23. update_google_drive_file：覆盖更新 Google Docs 或文本类 Drive 文件内容。',
+              '24. move_google_drive_file：把 Drive 文件移动到指定文件夹。',
+              '25. create_google_drive_folder：在 Drive 中创建文件夹。',
+              '26. create_google_drive_text_file：仅用于创建 Google Docs 或文本类文件，不要用于 PDF、图片、Office 文档或压缩包。',
+              '27. upload_google_drive_file_auto：PDF、图片、Office 文档、压缩包等文件优先使用这个统一上传入口，服务端会自动选择上传策略。',
+              '28. upload_google_drive_file：单次上传较小文件。',
+              '29. start_google_drive_upload：开始大文件分片上传会话。',
+              '30. append_google_drive_upload_chunk：向上传会话追加一个分片。',
+              '31. finish_google_drive_upload：完成分片上传并写入 Drive。',
+              '32. abort_google_drive_upload：取消分片上传并清理临时文件。',
               '当 Google Sheets 同步启用时，新增和撤销会自动同步到当前 MCP 调用用户的个人 Google Sheets 文件。',
+              '如果需要读取尚未结构化的共享表原始材料，请优先使用 list_shared_google_sheet_tabs 和 read_shared_google_sheet_cells。',
               'Google Drive 文件读取/编辑依赖当前 Google OAuth token 拥有相应 Drive scope。',
               '建议在写入前先向用户确认报销人、金额、日期和内容，再调用 add_expense。',
             ].join('\n')
@@ -1471,19 +1551,25 @@ export function createAccountingServer(
               '13. list_saved_views: inspect previously saved query views.',
               '14. run_saved_view: rerun a saved view and optionally sync it to a worksheet.',
               '15. delete_saved_view: remove a saved view that is no longer needed.',
-              '16. list_google_drive_files: inspect Google Drive files available to the current Google user.',
-              '17. read_google_drive_file: read a Google Docs or text-like Drive file.',
-              '18. update_google_drive_file: replace the content of a Google Docs or text-like Drive file.',
-              '19. move_google_drive_file: move a Drive file into a target folder.',
-              '20. create_google_drive_folder: create a Drive folder.',
-              '21. create_google_drive_text_file: only for Google Docs or text-like Drive files, not for PDFs, images, Office files, or archives.',
-              '22. upload_google_drive_file_auto: preferred unified upload entrypoint for PDFs, images, Office files, archives, and other non-text files; the server chooses the upload strategy automatically.',
-              '23. upload_google_drive_file: upload a smaller file in one call.',
-              '24. start_google_drive_upload: begin a chunked upload session for a larger file.',
-              '25. append_google_drive_upload_chunk: append one chunk to an upload session.',
-              '26. finish_google_drive_upload: finalize a chunked upload into Drive.',
-              '27. abort_google_drive_upload: cancel a chunked upload and remove temp data.',
+              '16. create_shared_google_sheet: create or reuse a shared Google Sheet for a workspace.',
+              '17. share_shared_google_sheet: share the shared sheet with collaborators by workspaceId or Google Sheets URL.',
+              '18. get_shared_google_sheet: inspect a shared sheet and its members by workspaceId or Google Sheets URL.',
+              '19. list_shared_google_sheet_tabs: list worksheet tabs in a shared Google Sheet.',
+              '20. read_shared_google_sheet_cells: read raw shared sheet cells for materials that have not yet been converted into structured records.',
+              '21. list_google_drive_files: inspect Google Drive files available to the current Google user.',
+              '22. read_google_drive_file: read a Google Docs or text-like Drive file.',
+              '23. update_google_drive_file: replace the content of a Google Docs or text-like Drive file.',
+              '24. move_google_drive_file: move a Drive file into a target folder.',
+              '25. create_google_drive_folder: create a Drive folder.',
+              '26. create_google_drive_text_file: only for Google Docs or text-like Drive files, not for PDFs, images, Office files, or archives.',
+              '27. upload_google_drive_file_auto: preferred unified upload entrypoint for PDFs, images, Office files, archives, and other non-text files; the server chooses the upload strategy automatically.',
+              '28. upload_google_drive_file: upload a smaller file in one call.',
+              '29. start_google_drive_upload: begin a chunked upload session for a larger file.',
+              '30. append_google_drive_upload_chunk: append one chunk to an upload session.',
+              '31. finish_google_drive_upload: finalize a chunked upload into Drive.',
+              '32. abort_google_drive_upload: cancel a chunked upload and remove temp data.',
               'When Google Sheets sync is enabled, writes and cancellations update the current MCP caller-specific Google Sheets file automatically.',
+              'Use list_shared_google_sheet_tabs and read_shared_google_sheet_cells when the user wants raw shared-sheet material instead of already-structured accounting records.',
               'Google Drive file access depends on the current Google OAuth token having sufficient Drive scopes.',
               'Confirm claimant, amount, expense date, and description before calling add_expense.',
             ].join('\n');

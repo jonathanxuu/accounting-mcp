@@ -169,6 +169,10 @@ function toAmountCents(amount: number): number {
   return Math.round(amount * 100);
 }
 
+function toJsonbArrayParam(values: readonly unknown[]): string {
+  return JSON.stringify(values);
+}
+
 function toNumberArray(value: unknown[] | null | undefined): number[] {
   if (!Array.isArray(value)) {
     return [];
@@ -500,6 +504,84 @@ async function fetchOwnedRecordDetails(
   return row;
 }
 
+async function fetchOwnedAccountingRecord(
+  db: Queryable,
+  recordId: number,
+  actor: McpUserIdentity,
+): Promise<AccountingRecordRow> {
+  const result = await db.query<AccountingRecordRow>(
+    `
+    SELECT ar.*
+    FROM accounting_records ar
+    INNER JOIN accounting_cases ac
+      ON ac.id = ar.accounting_case_id
+    WHERE ar.id = $1
+      AND (
+        ac.owner_user_key = $2
+        OR EXISTS (
+          SELECT 1
+          FROM shared_spreadsheet_members ssm
+          WHERE ssm.workspace_id = ac.workspace_id
+            AND (ssm.member_key = $2 OR ssm.member_identity = $3)
+        )
+      )
+    `,
+    [recordId, actor.key, memberIdentityForUser(actor)],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Accounting record ${recordId} was not found`);
+  }
+
+  return row;
+}
+
+async function ensureSourceMaterialsInCase(
+  db: Queryable,
+  sourceMaterialIds: number[],
+  accountingCaseId: number,
+  actor: McpUserIdentity,
+) {
+  const normalizedIds = sortUniqueNumbers(sourceMaterialIds);
+
+  if (normalizedIds.length === 0) {
+    return normalizedIds;
+  }
+
+  const result = await db.query<{ id: string | number }>(
+    `
+    SELECT sm.id
+    FROM source_materials sm
+    INNER JOIN accounting_cases ac
+      ON ac.id = sm.accounting_case_id
+    WHERE sm.accounting_case_id = $1
+      AND sm.id = ANY($2)
+      AND (
+        ac.owner_user_key = $3
+        OR EXISTS (
+          SELECT 1
+          FROM shared_spreadsheet_members ssm
+          WHERE ssm.workspace_id = ac.workspace_id
+            AND (ssm.member_key = $3 OR ssm.member_identity = $4)
+        )
+      )
+    `,
+    [accountingCaseId, normalizedIds, actor.key, memberIdentityForUser(actor)],
+  );
+
+  const foundIds = new Set(result.rows.map((row) => Number(row.id)));
+  const missingIds = normalizedIds.filter((id) => !foundIds.has(id));
+
+  if (missingIds.length > 0) {
+    throw new Error(
+      `Source material ids ${missingIds.join(', ')} were not found in accounting case ${accountingCaseId}`,
+    );
+  }
+
+  return normalizedIds;
+}
+
 async function findMatchingOpenReviewItem(
   db: Queryable,
   input: {
@@ -561,7 +643,15 @@ async function upsertSystemReviewItem(
       WHERE id = $7
       RETURNING *
       `,
-      [input.priority, linkedRecordIds, linkedMaterialIds, input.details, actor.label, now, existing.id],
+      [
+        input.priority,
+        toJsonbArrayParam(linkedRecordIds),
+        toJsonbArrayParam(linkedMaterialIds),
+        input.details,
+        actor.label,
+        now,
+        existing.id,
+      ],
     );
 
     await insertAuditEvent(db, actor, {
@@ -603,8 +693,8 @@ async function upsertSystemReviewItem(
       input.accountingCaseId,
       input.issueType,
       input.priority,
-      linkedRecordIds,
-      linkedMaterialIds,
+      toJsonbArrayParam(linkedRecordIds),
+      toJsonbArrayParam(linkedMaterialIds),
       input.summary,
       input.details,
       actor.label,
@@ -1077,7 +1167,7 @@ export class WorkflowRepository {
           input.rawText ?? null,
           input.contentHash ?? null,
           input.extractedFields,
-          input.evidenceRefs,
+          toJsonbArrayParam(input.evidenceRefs),
           input.confidence ?? null,
           input.status,
           actor.label,
@@ -1119,6 +1209,13 @@ export class WorkflowRepository {
       let row: AccountingRecordRow;
 
       if (input.id) {
+        const existing = await fetchOwnedAccountingRecord(client, input.id, actor);
+        const effectiveSourceMaterialIds = await ensureSourceMaterialsInCase(
+          client,
+          input.sourceMaterialIds ?? toNumberArray(existing.source_material_ids_json),
+          input.accountingCaseId,
+          actor,
+        );
         const result = await client.query<AccountingRecordRow>(
           `
           UPDATE accounting_records ar
@@ -1153,7 +1250,7 @@ export class WorkflowRepository {
           [
             input.accountingCaseId,
             input.recordFamily,
-            input.sourceMaterialIds,
+            toJsonbArrayParam(effectiveSourceMaterialIds),
             input.counterparty ?? null,
             amountCents,
             input.currency,
@@ -1180,9 +1277,24 @@ export class WorkflowRepository {
           action: 'updated',
           objectType: 'accounting_record',
           objectId: String(row.id),
-          diff: input,
+          diff: {
+            ...input,
+            sourceMaterialIds: effectiveSourceMaterialIds,
+          },
+          context:
+            input.sourceMaterialIds === undefined
+              ? {
+                  preservedExistingSourceMaterialIds: true,
+                }
+              : undefined,
         });
       } else {
+        const effectiveSourceMaterialIds = await ensureSourceMaterialsInCase(
+          client,
+          input.sourceMaterialIds ?? [],
+          input.accountingCaseId,
+          actor,
+        );
         const result = await client.query<AccountingRecordRow>(
           `
           INSERT INTO accounting_records (
@@ -1207,7 +1319,7 @@ export class WorkflowRepository {
           [
             input.accountingCaseId,
             input.recordFamily,
-            input.sourceMaterialIds,
+            toJsonbArrayParam(effectiveSourceMaterialIds),
             input.counterparty ?? null,
             amountCents,
             input.currency,
@@ -1230,7 +1342,10 @@ export class WorkflowRepository {
           action: 'created',
           objectType: 'accounting_record',
           objectId: String(row.id),
-          diff: input,
+          diff: {
+            ...input,
+            sourceMaterialIds: effectiveSourceMaterialIds,
+          },
         });
       }
 
@@ -1519,8 +1634,8 @@ export class WorkflowRepository {
             input.issueType,
             input.status,
             input.priority,
-            input.linkedRecordIds,
-            input.linkedMaterialIds,
+            toJsonbArrayParam(input.linkedRecordIds),
+            toJsonbArrayParam(input.linkedMaterialIds),
             input.assignee ?? null,
             input.summary,
             input.details ?? null,
@@ -1571,8 +1686,8 @@ export class WorkflowRepository {
             input.issueType,
             input.status,
             input.priority,
-            input.linkedRecordIds,
-            input.linkedMaterialIds,
+            toJsonbArrayParam(input.linkedRecordIds),
+            toJsonbArrayParam(input.linkedMaterialIds),
             input.assignee ?? null,
             input.summary,
             input.details ?? null,
@@ -1862,7 +1977,7 @@ export class WorkflowRepository {
             matchedAmountCents,
             input.currency,
             input.status,
-            input.evidenceRefs,
+            toJsonbArrayParam(input.evidenceRefs),
             input.notes ?? null,
             actor.label,
             now,
@@ -1910,7 +2025,7 @@ export class WorkflowRepository {
             matchedAmountCents,
             input.currency,
             input.status,
-            input.evidenceRefs,
+            toJsonbArrayParam(input.evidenceRefs),
             input.notes ?? null,
             actor.label,
             actor.label,

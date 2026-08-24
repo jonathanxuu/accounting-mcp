@@ -270,4 +270,34 @@ export async function initializeDatabase(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_saved_views_view_type
       ON saved_views (view_type);
   `);
+
+  // Repair legacy rows that may have stored JSONB array columns as `{}` when
+  // JavaScript arrays were serialized through PostgreSQL array literals.
+  await pool.query(`
+    UPDATE source_materials
+    SET evidence_refs_json = '[]'::jsonb
+    WHERE jsonb_typeof(evidence_refs_json) IS DISTINCT FROM 'array';
+
+    UPDATE accounting_records
+    SET source_material_ids_json = '[]'::jsonb
+    WHERE jsonb_typeof(source_material_ids_json) IS DISTINCT FROM 'array';
+
+    UPDATE review_items
+    SET
+      linked_record_ids_json = CASE
+        WHEN jsonb_typeof(linked_record_ids_json) = 'array' THEN linked_record_ids_json
+        ELSE '[]'::jsonb
+      END,
+      linked_material_ids_json = CASE
+        WHEN jsonb_typeof(linked_material_ids_json) = 'array' THEN linked_material_ids_json
+        ELSE '[]'::jsonb
+      END
+    WHERE
+      jsonb_typeof(linked_record_ids_json) IS DISTINCT FROM 'array'
+      OR jsonb_typeof(linked_material_ids_json) IS DISTINCT FROM 'array';
+
+    UPDATE reconciliation_links
+    SET evidence_refs_json = '[]'::jsonb
+    WHERE jsonb_typeof(evidence_refs_json) IS DISTINCT FROM 'array';
+  `);
 }

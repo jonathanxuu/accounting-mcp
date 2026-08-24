@@ -33,6 +33,29 @@ const stringArraySchema = z.array(z.string().trim().min(1)).default([]);
 const idArraySchema = z.array(z.number().int().positive()).default([]);
 const worksheetNameSchema = z.string().trim().min(1).max(100);
 const driveFileIdSchema = z.string().trim().min(1).max(255);
+const sheetRangeSchema = z.string().trim().min(1).max(200);
+
+function parsePositiveIdArrayInput(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+const materialLinkIdsSchema = z.preprocess(
+  parsePositiveIdArrayInput,
+  z.array(z.number().int().positive()).transform((values) => [...new Set(values)].sort((a, b) => a - b)),
+);
 
 export const addExpenseSchema = z.object({
   claimant: z.string().trim().min(1).max(100).describe('The reimbursement claimant name'),
@@ -158,7 +181,7 @@ export const upsertAccountingRecordSchema = z.object({
   id: z.number().int().positive().optional(),
   accountingCaseId: z.number().int().positive(),
   recordFamily: accountingRecordFamilySchema,
-  sourceMaterialIds: idArraySchema.optional().default([]),
+  sourceMaterialIds: materialLinkIdsSchema.optional(),
   counterparty: z.string().trim().min(1).max(200).optional(),
   amount: z.number().positive().max(1_000_000),
   currency: currencySchema,
@@ -368,6 +391,15 @@ export const getSharedGoogleSheetSchema = z
     path: ['workspaceId'],
   });
 
+export const listSharedGoogleSheetTabsSchema = getSharedGoogleSheetSchema;
+
+export const readSharedGoogleSheetCellsSchema = getSharedGoogleSheetSchema.extend({
+  worksheetName: worksheetNameSchema.describe('Worksheet tab name to read from'),
+  range: sheetRangeSchema
+    .default('A:ZZ')
+    .describe('A1 range within the worksheet, such as A1:N50 or A:ZZ'),
+});
+
 export const createGoogleDriveTextFileSchema = z.object({
   name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
   mimeType: z
@@ -470,6 +502,8 @@ export type CreateGoogleDriveFolderInput = z.infer<typeof createGoogleDriveFolde
 export type CreateSharedGoogleSheetInput = z.infer<typeof createSharedGoogleSheetSchema>;
 export type ShareSharedGoogleSheetInput = z.infer<typeof shareSharedGoogleSheetSchema>;
 export type GetSharedGoogleSheetInput = z.infer<typeof getSharedGoogleSheetSchema>;
+export type ListSharedGoogleSheetTabsInput = z.infer<typeof listSharedGoogleSheetTabsSchema>;
+export type ReadSharedGoogleSheetCellsInput = z.infer<typeof readSharedGoogleSheetCellsSchema>;
 export type CreateGoogleDriveTextFileInput = z.infer<typeof createGoogleDriveTextFileSchema>;
 export type UploadGoogleDriveFileInput = z.infer<typeof uploadGoogleDriveFileSchema>;
 export type UploadGoogleDriveFileAutoInput = z.infer<typeof uploadGoogleDriveFileAutoSchema>;

@@ -62,6 +62,26 @@ export type SharedSpreadsheetResult = {
   members: SharedSpreadsheetMember[];
 };
 
+export type SharedSpreadsheetTabSummary = {
+  sheetId: number | null;
+  title: string;
+  index: number | null;
+  rowCount: number | null;
+  columnCount: number | null;
+};
+
+export type SharedSpreadsheetTabsResult = SharedSpreadsheetResult & {
+  tabs: SharedSpreadsheetTabSummary[];
+};
+
+export type SharedSpreadsheetCellsResult = SharedSpreadsheetResult & {
+  worksheetName: string;
+  range: string;
+  effectiveRange: string | null;
+  values: string[][];
+  rowCount: number;
+};
+
 const HEADER = [
   'expense_id',
   'claimant',
@@ -643,6 +663,88 @@ export class GoogleSheetsSync {
       ownerUserKey: access.ownerUserKey,
       ownerUserLabel: access.ownerUserLabel,
       members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(access.workspaceId),
+    };
+  }
+
+  async listSharedSpreadsheetTabs(
+    user: McpUserIdentity,
+    input: {
+      workspaceId?: string;
+      spreadsheetUrl?: string;
+    },
+  ): Promise<SharedSpreadsheetTabsResult> {
+    const access = await this.requireSharedSpreadsheetAccessByLocator(input, user, 'viewer');
+    const sheets = await this.getSheetsApi(user);
+
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId: access.spreadsheetId,
+      fields:
+        'sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))',
+    });
+
+    return {
+      workspaceId: access.workspaceId,
+      spreadsheetId: access.spreadsheetId,
+      spreadsheetUrl: access.spreadsheetUrl,
+      title: access.title,
+      ownerUserKey: access.ownerUserKey,
+      ownerUserLabel: access.ownerUserLabel,
+      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(access.workspaceId),
+      tabs:
+        spreadsheet.data.sheets?.map((sheet) => ({
+          sheetId: sheet.properties?.sheetId ?? null,
+          title: sheet.properties?.title ?? 'Untitled',
+          index: sheet.properties?.index ?? null,
+          rowCount: sheet.properties?.gridProperties?.rowCount ?? null,
+          columnCount: sheet.properties?.gridProperties?.columnCount ?? null,
+        })) ?? [],
+    };
+  }
+
+  async readSharedSpreadsheetCells(
+    user: McpUserIdentity,
+    input: {
+      workspaceId?: string;
+      spreadsheetUrl?: string;
+      worksheetName: string;
+      range: string;
+    },
+  ): Promise<SharedSpreadsheetCellsResult> {
+    const access = await this.requireSharedSpreadsheetAccessByLocator(input, user, 'viewer');
+    const sheets = await this.getSheetsApi(user);
+
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const normalizedWorksheetName = buildDetailSheetName(input.worksheetName);
+    const normalizedRange = input.range.trim() || 'A:ZZ';
+    const requestedRange = a1Range(normalizedWorksheetName, normalizedRange);
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: access.spreadsheetId,
+      range: requestedRange,
+    });
+
+    const values =
+      result.data.values?.map((row) => row.map((cell) => String(cell ?? ''))) ?? [];
+
+    return {
+      workspaceId: access.workspaceId,
+      spreadsheetId: access.spreadsheetId,
+      spreadsheetUrl: access.spreadsheetUrl,
+      title: access.title,
+      ownerUserKey: access.ownerUserKey,
+      ownerUserLabel: access.ownerUserLabel,
+      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(access.workspaceId),
+      worksheetName: normalizedWorksheetName,
+      range: normalizedRange,
+      effectiveRange: result.data.range ?? null,
+      values,
+      rowCount: values.length,
     };
   }
 
