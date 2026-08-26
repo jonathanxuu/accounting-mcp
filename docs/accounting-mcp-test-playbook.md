@@ -25,6 +25,8 @@
 - 查询结果同步到 Google Sheets
 - 同一个 workspace 共享一张 Google Sheet 给多人协作
 - 直接读取 shared Google Sheet 的原始 worksheet 单元格
+- 覆盖编辑或追加 shared Google Sheet 的指定单元格范围
+- Accounting Record 新增和修正后自动同步到 `Accounting Records`
 - Google Drive 文件夹创建、文件上传、文件移动
 
 ## 新增协作测试主线
@@ -43,6 +45,7 @@
 
 - 会调用 `create_shared_google_sheet`
 - 返回 `workspaceId`、`spreadsheetId`、`spreadsheetUrl`
+- 新表默认只有 `Accounting Records` 和 `Source Materials` 两个 tab，不应出现 `Expenses`
 
 ### 步骤 2：A 把表共享给 B
 
@@ -186,7 +189,34 @@
 预期：
 
 - 前两条会调用 `upsert_accounting_record`
+- 每条新增记录会自动登记到共享表 `Accounting Records`
 - 最后一条会调用 `upsert_reconciliation_link`
+
+然后把第一条记录金额或描述改掉，再发送：
+
+```text
+请读取共享表 Accounting Records 的 A1:V10，确认刚才的更正已经显示在对应 record_id 那一行。
+```
+
+预期：
+
+- 修正仍调用 `upsert_accounting_record`，不会在 Sheet 重复新增同一个 `record_id`
+- 随后调用 `read_google_sheet_cells` 读回真实单元格
+- 对应行已更新，且工具回执中的 `sheetSync.ok` 为 `true`
+
+### 步骤 4.1：验证指定单元格写入和读回
+
+发送：
+
+```text
+请在这张共享表新建或使用 Notes tab，把 A1:B2 更新为两行：第一行是 field、value，第二行是 status、verified。然后直接读回 A1:B2 给我确认。
+```
+
+预期：
+
+- 调用 `write_google_sheet_cells`，使用 `mode=update`
+- 调用 `read_google_sheet_cells` 读回
+- 返回的二维 values 与写入内容完全一致
 
 ### 步骤 5：查结果并同步到 Google Sheets
 

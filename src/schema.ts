@@ -34,6 +34,7 @@ const idArraySchema = z.array(z.number().int().positive()).default([]);
 const worksheetNameSchema = z.string().trim().min(1).max(100);
 const driveFileIdSchema = z.string().trim().min(1).max(255);
 const sheetRangeSchema = z.string().trim().min(1).max(200);
+const sheetCellValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
 function parsePositiveIdArrayInput(value: unknown): unknown {
   if (typeof value !== 'string') {
@@ -400,6 +401,26 @@ export const readSharedGoogleSheetCellsSchema = getSharedGoogleSheetSchema.exten
     .describe('A1 range within the worksheet, such as A1:N50 or A:ZZ'),
 });
 
+export const writeGoogleSheetCellsSchema = getSharedGoogleSheetSchema.extend({
+  worksheetName: worksheetNameSchema.describe('Worksheet tab name to write to'),
+  range: sheetRangeSchema.describe(
+    'A1 range within the worksheet. Use a start cell such as A1 for update, or a table range such as A:Z for append.',
+  ),
+  values: z
+    .array(z.array(sheetCellValueSchema).min(1).max(100))
+    .min(1)
+    .max(500)
+    .describe('Two-dimensional rows and cells to write'),
+  mode: z
+    .enum(['update', 'append'])
+    .default('update')
+    .describe('update replaces values beginning at the range; append adds rows after existing table data'),
+  valueInputOption: z
+    .enum(['RAW', 'USER_ENTERED'])
+    .default('USER_ENTERED')
+    .describe('RAW stores literal values; USER_ENTERED lets Google Sheets interpret formulas, dates, and numbers'),
+});
+
 export const createGoogleDriveTextFileSchema = z.object({
   name: z.string().trim().min(1).max(255).describe('Google Drive file name'),
   mimeType: z
@@ -504,6 +525,7 @@ export type ShareSharedGoogleSheetInput = z.infer<typeof shareSharedGoogleSheetS
 export type GetSharedGoogleSheetInput = z.infer<typeof getSharedGoogleSheetSchema>;
 export type ListSharedGoogleSheetTabsInput = z.infer<typeof listSharedGoogleSheetTabsSchema>;
 export type ReadSharedGoogleSheetCellsInput = z.infer<typeof readSharedGoogleSheetCellsSchema>;
+export type WriteGoogleSheetCellsInput = z.infer<typeof writeGoogleSheetCellsSchema>;
 export type CreateGoogleDriveTextFileInput = z.infer<typeof createGoogleDriveTextFileSchema>;
 export type UploadGoogleDriveFileInput = z.infer<typeof uploadGoogleDriveFileSchema>;
 export type UploadGoogleDriveFileAutoInput = z.infer<typeof uploadGoogleDriveFileAutoSchema>;

@@ -38,6 +38,7 @@ import {
   upsertAccountingRecordSchema,
   upsertReconciliationLinkSchema,
   upsertReviewItemSchema,
+  writeGoogleSheetCellsSchema,
   finishGoogleDriveUploadSchema,
 } from './schema.js';
 
@@ -98,7 +99,9 @@ async function syncWorksheetViewIfEnabled(
 function recordSearchWorksheetRows(result: {
   items: Array<{
     id: number;
+    accountingCaseId: number;
     recordFamily: string;
+    sourceMaterialIds: number[];
     counterparty: string | null;
     amount: number;
     amountCents: number;
@@ -107,6 +110,11 @@ function recordSearchWorksheetRows(result: {
     documentNo: string | null;
     status: string;
     description: string | null;
+    attributes: Record<string, unknown>;
+    createdBy: string;
+    updatedBy: string;
+    createdAt: string;
+    updatedAt: string;
     case: {
       id: number;
       workspaceId: string;
@@ -127,6 +135,7 @@ function recordSearchWorksheetRows(result: {
       'service_scope',
       'case_status',
       'record_family',
+      'source_material_ids',
       'counterparty',
       'amount',
       'amount_cents',
@@ -135,6 +144,11 @@ function recordSearchWorksheetRows(result: {
       'document_no',
       'record_status',
       'description',
+      'attributes',
+      'created_by',
+      'updated_by',
+      'created_at',
+      'updated_at',
     ],
     rows: result.items.map((item) => [
       item.id,
@@ -145,6 +159,7 @@ function recordSearchWorksheetRows(result: {
       item.case.serviceScope,
       item.case.status,
       item.recordFamily,
+      item.sourceMaterialIds,
       item.counterparty,
       item.amount,
       item.amountCents,
@@ -153,8 +168,46 @@ function recordSearchWorksheetRows(result: {
       item.documentNo,
       item.status,
       item.description,
+      item.attributes,
+      item.createdBy,
+      item.updatedBy,
+      item.createdAt,
+      item.updatedAt,
     ]),
   };
+}
+
+async function syncAllWorkspaceAccountingRecords(
+  sync: GoogleSheetsSync,
+  workflowRepository: WorkflowRepository,
+  user: McpUserIdentity,
+  workspaceId: string,
+) {
+  const items: Awaited<ReturnType<WorkflowRepository['searchAccountingRecords']>>['items'] = [];
+  const pageSize = 200;
+  let offset = 0;
+  let total = 0;
+
+  do {
+    const input = searchAccountingRecordsSchema.parse({
+      workspaceId,
+      limit: pageSize,
+      offset,
+      sortBy: 'recordDate',
+      sortOrder: 'asc',
+    });
+    const page = await workflowRepository.searchAccountingRecords(input, user);
+    items.push(...page.items);
+    total = page.totals.recordCount;
+    offset += page.items.length;
+  } while (offset < total && offset > 0);
+
+  const worksheet = recordSearchWorksheetRows({ items });
+  return sync.syncWorksheetView(user, {
+    workspaceId,
+    worksheetName: 'Accounting Records',
+    ...worksheet,
+  });
 }
 
 function reviewItemWorksheetRows(result: {
@@ -276,6 +329,42 @@ async function syncExpenseIfEnabled(
   }
 }
 
+async function syncAccountingRecordIfEnabled(
+  sync: GoogleSheetsSync | null,
+  workflowRepository: WorkflowRepository,
+  record: Awaited<ReturnType<WorkflowRepository['upsertAccountingRecord']>>,
+  user: McpUserIdentity,
+) {
+  if (!sync) {
+    return null;
+  }
+
+  try {
+    const accountingCase = await workflowRepository.getAccountingCase(
+      record.accountingCaseId,
+      user,
+    );
+    const result = await sync.syncAccountingRecord(user, record, accountingCase);
+    return {
+      ok: true,
+      error: null,
+      ...result,
+    };
+  } catch (error) {
+    console.error('Failed to sync accounting record to Google Sheets', error);
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'Unknown Google Sheets sync error',
+      spreadsheetId: null,
+      spreadsheetUrl: null,
+      worksheetName: 'Accounting Records',
+      rowCount: 1,
+      workspaceId: null,
+      syncMode: null,
+    };
+  }
+}
+
 export function createAccountingServer(
   repository: ExpenseRepository,
   workflowRepository: WorkflowRepository,
@@ -293,7 +382,7 @@ export function createAccountingServer(
     {
       title: 'Create Shared Google Sheet',
       description:
-        'Create or reuse one shared Google Sheet for a workspace, owned by the current Google OAuth user, and optionally share it with additional member emails.',
+        'Create or reuse one shared Google Sheet for a workspace with Accounting Records and Source Materials tabs, backfill existing database records, and optionally share it with member emails.',
       inputSchema: createSharedGoogleSheetSchema.shape,
     },
     async (input) => {
@@ -304,19 +393,55 @@ export function createAccountingServer(
       const user = requireMcpUser(mcpUser);
       const parsed = createSharedGoogleSheetSchema.parse(input);
       const result = await sheetsSync.createSharedSpreadsheet(user, parsed);
+      let accountingRecordsSync:
+        | ({ ok: true; error: null } & Awaited<
+            ReturnType<typeof syncAllWorkspaceAccountingRecords>
+          >)
+        | {
+            ok: false;
+            error: string;
+            worksheetName: 'Accounting Records';
+          };
+
+      try {
+        const synced = await syncAllWorkspaceAccountingRecords(
+          sheetsSync,
+          workflowRepository,
+          user,
+          result.workspaceId,
+        );
+        accountingRecordsSync = {
+          ok: true,
+          error: null,
+          ...synced,
+        };
+      } catch (error) {
+        console.error('Failed to backfill Accounting Records worksheet', error);
+        accountingRecordsSync = {
+          ok: false,
+          error: error instanceof Error ? error.message : 'Unknown Google Sheets sync error',
+          worksheetName: 'Accounting Records',
+        };
+      }
+      const response = {
+        ...result,
+        accountingRecordsSync,
+      };
 
       return {
         content: [
           {
             type: 'text',
-            text: `Shared Google Sheet ready for workspace ${result.workspaceId}.`,
+            text: accountingRecordsSync.ok
+              ? `Shared Google Sheet ready for workspace ${result.workspaceId}; Accounting Records is synchronized.`
+              : `Shared Google Sheet ready for workspace ${result.workspaceId}; Accounting Records backfill failed: ${accountingRecordsSync.error}`,
           },
           {
             type: 'text',
-            text: formatJson(result),
+            text: formatJson(response),
           },
         ],
-        structuredContent: result,
+        structuredContent: response,
       };
     },
   );
@@ -395,7 +520,7 @@ export function createAccountingServer(
     {
       title: 'List Shared Google Sheet Tabs',
       description:
-        'List worksheet tabs for a shared Google Sheet so an agent can inspect raw collaboration tabs before records are structured.',
+        'List every worksheet tab in a registered workspace Google Sheet, including Accounting Records, Source Materials, and user-created tabs.',
       inputSchema: listSharedGoogleSheetTabsSchema.shape,
       annotations: {
         readOnlyHint: true,
@@ -431,7 +556,7 @@ export function createAccountingServer(
     {
       title: 'Read Shared Google Sheet Cells',
       description:
-        'Read raw cell values from a shared Google Sheet worksheet. Use this when the user wants to inspect materials that are still only in the shared sheet and have not yet been converted into structured accounting records.',
+        'Backward-compatible alias for read_google_sheet_cells. Read any requested A1 range from a registered workspace Google Sheet by workspaceId or Google Sheets URL.',
       inputSchema: readSharedGoogleSheetCellsSchema.shape,
       annotations: {
         readOnlyHint: true,
@@ -451,6 +576,78 @@ export function createAccountingServer(
           {
             type: 'text',
             text: `Read ${result.rowCount} row(s) from worksheet ${result.worksheetName} in workspace ${result.workspaceId}.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'read_google_sheet_cells',
+    {
+      title: 'Read Google Sheet Cells',
+      description:
+        'Read the actual current values from a specific tab and A1 range in a registered workspace Google Sheet. Identify the sheet by workspaceId or Google Sheets URL. Use this to verify cell contents instead of inferring that a sync succeeded.',
+      inputSchema: readSharedGoogleSheetCellsSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+      },
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = readSharedGoogleSheetCellsSchema.parse(input);
+      const result = await sheetsSync.readSharedSpreadsheetCells(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Read ${result.rowCount} row(s) from ${result.worksheetName}. These are the current Google Sheet cell values.`,
+          },
+          {
+            type: 'text',
+            text: formatJson(result),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
+    'write_google_sheet_cells',
+    {
+      title: 'Write Google Sheet Cells',
+      description:
+        'Write or edit a specific tab and A1 range in a registered workspace Google Sheet by workspaceId or Google Sheets URL. Use mode=update to replace cells at a range, or mode=append to add rows. Requires editor access.',
+      inputSchema: writeGoogleSheetCellsSchema.shape,
+      annotations: {
+        destructiveHint: true,
+      },
+    },
+    async (input) => {
+      if (!sheetsSync) {
+        throw new Error('Google Sheets sync is not enabled');
+      }
+
+      const user = requireMcpUser(mcpUser);
+      const parsed = writeGoogleSheetCellsSchema.parse(input);
+      const result = await sheetsSync.writeSharedSpreadsheetCells(user, parsed);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `${result.mode === 'append' ? 'Appended' : 'Updated'} ${result.updatedCells} cell(s) in ${result.worksheetName}.`,
           },
           {
             type: 'text',
@@ -935,26 +1132,40 @@ export function createAccountingServer(
     {
       title: 'Upsert Accounting Record',
       description:
-        'Create or update a structured accounting record such as an expense claim, vendor bill, customer invoice, or bank transaction.',
+        'Create or update a structured accounting record such as an expense claim, vendor bill, customer invoice, or bank transaction. The server automatically inserts or updates the matching record_id row in the workspace Google Sheet Accounting Records tab and returns the real sync result.',
       inputSchema: upsertAccountingRecordSchema.shape,
     },
     async (input) => {
       const user = requireMcpUser(mcpUser);
       const parsed = upsertAccountingRecordSchema.parse(input);
       const saved = await workflowRepository.upsertAccountingRecord(parsed, user);
+      const sheetSync = await syncAccountingRecordIfEnabled(
+        sheetsSync,
+        workflowRepository,
+        saved,
+        user,
+      );
+      const response = {
+        ...saved,
+        sheetSync,
+      };
 
       return {
         content: [
           {
             type: 'text',
-            text: `Accounting record ${saved.id} saved in family ${saved.recordFamily}.`,
+            text: sheetSync?.ok
+              ? `Accounting record ${saved.id} saved and synced to worksheet ${sheetSync.worksheetName}.`
+              : sheetSync?.error
+                ? `Accounting record ${saved.id} saved in the database. Worksheet sync failed: ${sheetSync.error}`
+                : `Accounting record ${saved.id} saved in family ${saved.recordFamily}.`,
           },
           {
             type: 'text',
-            text: formatJson(saved),
+            text: formatJson(response),
           },
         ],
-        structuredContent: saved,
+        structuredContent: response,
       };
     },
   );
@@ -1503,7 +1714,7 @@ export function createAccountingServer(
               '4. query_expense_summary：按人、类别、月份等维度统计汇总。',
               '5. upsert_accounting_case：创建或更新账务 case。',
               '6. ingest_source_material：保存原始材料与提取结果。',
-              '7. upsert_accounting_record：创建或修正结构化账务记录。',
+              '7. upsert_accounting_record：创建或修正结构化账务记录，并自动新增或更新共享表的 Accounting Records 行。',
               '8. upsert_reconciliation_link：创建或更新对账关系。',
               '9. list_reconciliation_links：查询对账关系。',
               '10. search_accounting_records：查询结构化账务记录。',
@@ -1517,20 +1728,23 @@ export function createAccountingServer(
               '18. get_shared_google_sheet：按 workspaceId 或 Google Sheet URL 查看共享表信息和成员。',
               '19. list_shared_google_sheet_tabs：查看共享表有哪些 worksheet tab。',
               '20. read_shared_google_sheet_cells：直接读取共享表原始单元格，适合查询尚未转成结构化记录的材料。',
-              '21. list_google_drive_files：查看当前 Google 用户可访问的 Drive 文件。',
-              '22. read_google_drive_file：读取 Google Docs 或文本类 Drive 文件内容。',
-              '23. update_google_drive_file：覆盖更新 Google Docs 或文本类 Drive 文件内容。',
-              '24. move_google_drive_file：把 Drive 文件移动到指定文件夹。',
-              '25. create_google_drive_folder：在 Drive 中创建文件夹。',
-              '26. create_google_drive_text_file：仅用于创建 Google Docs 或文本类文件，不要用于 PDF、图片、Office 文档或压缩包。',
-              '27. upload_google_drive_file_auto：PDF、图片、Office 文档、压缩包等文件优先使用这个统一上传入口，服务端会自动选择上传策略。',
-              '28. upload_google_drive_file：单次上传较小文件。',
-              '29. start_google_drive_upload：开始大文件分片上传会话。',
-              '30. append_google_drive_upload_chunk：向上传会话追加一个分片。',
-              '31. finish_google_drive_upload：完成分片上传并写入 Drive。',
-              '32. abort_google_drive_upload：取消分片上传并清理临时文件。',
-              '当 Google Sheets 同步启用时，新增和撤销会自动同步到当前 MCP 调用用户的个人 Google Sheets 文件。',
-              '如果需要读取尚未结构化的共享表原始材料，请优先使用 list_shared_google_sheet_tabs 和 read_shared_google_sheet_cells。',
+              '21. read_google_sheet_cells：按 workspaceId 或 Sheet URL 读取指定 tab 和 A1 单元格范围，并可用于同步后读回核验。',
+              '22. write_google_sheet_cells：按 workspaceId 或 Sheet URL 覆盖编辑指定范围，或向指定 tab 追加行。',
+              '23. list_google_drive_files：查看当前 Google 用户可访问的 Drive 文件。',
+              '24. read_google_drive_file：读取 Google Docs 或文本类 Drive 文件内容。',
+              '25. update_google_drive_file：覆盖更新 Google Docs 或文本类 Drive 文件内容。',
+              '26. move_google_drive_file：把 Drive 文件移动到指定文件夹。',
+              '27. create_google_drive_folder：在 Drive 中创建文件夹。',
+              '28. create_google_drive_text_file：仅用于创建 Google Docs 或文本类文件，不要用于 PDF、图片、Office 文档或压缩包。',
+              '29. upload_google_drive_file_auto：PDF、图片、Office 文档、压缩包等文件优先使用这个统一上传入口，服务端会自动选择上传策略。',
+              '30. upload_google_drive_file：单次上传较小文件。',
+              '31. start_google_drive_upload：开始大文件分片上传会话。',
+              '32. append_google_drive_upload_chunk：向上传会话追加一个分片。',
+              '33. finish_google_drive_upload：完成分片上传并写入 Drive。',
+              '34. abort_google_drive_upload：取消分片上传并清理临时文件。',
+              '新建 Sheet 默认包含 Accounting Records 和 Source Materials；旧版 Expenses 仅在明确调用 add_expense 时按需创建。',
+              'upsert_accounting_record 会自动同步 Accounting Records；需要核验时再调用 read_google_sheet_cells 读回实际单元格。',
+              '如果需要读取尚未结构化的共享表原始材料，请优先使用 list_shared_google_sheet_tabs 和 read_google_sheet_cells。',
               'Google Drive 文件读取/编辑依赖当前 Google OAuth token 拥有相应 Drive scope。',
               '建议在写入前先向用户确认报销人、金额、日期和内容，再调用 add_expense。',
             ].join('\n')
@@ -1542,7 +1756,7 @@ export function createAccountingServer(
               '4. query_expense_summary: aggregate totals by claimant, category, month, and more.',
               '5. upsert_accounting_case: create or update an accounting workflow case.',
               '6. ingest_source_material: store source evidence and extracted fields.',
-              '7. upsert_accounting_record: create or revise a structured accounting record.',
+              '7. upsert_accounting_record: create or revise a structured accounting record and automatically insert or update its Accounting Records worksheet row.',
               '8. upsert_reconciliation_link: create or update a reconciliation relationship.',
               '9. list_reconciliation_links: query reconciliation relationships.',
               '10. search_accounting_records: query structured accounting records.',
@@ -1556,20 +1770,23 @@ export function createAccountingServer(
               '18. get_shared_google_sheet: inspect a shared sheet and its members by workspaceId or Google Sheets URL.',
               '19. list_shared_google_sheet_tabs: list worksheet tabs in a shared Google Sheet.',
               '20. read_shared_google_sheet_cells: read raw shared sheet cells for materials that have not yet been converted into structured records.',
-              '21. list_google_drive_files: inspect Google Drive files available to the current Google user.',
-              '22. read_google_drive_file: read a Google Docs or text-like Drive file.',
-              '23. update_google_drive_file: replace the content of a Google Docs or text-like Drive file.',
-              '24. move_google_drive_file: move a Drive file into a target folder.',
-              '25. create_google_drive_folder: create a Drive folder.',
-              '26. create_google_drive_text_file: only for Google Docs or text-like Drive files, not for PDFs, images, Office files, or archives.',
-              '27. upload_google_drive_file_auto: preferred unified upload entrypoint for PDFs, images, Office files, archives, and other non-text files; the server chooses the upload strategy automatically.',
-              '28. upload_google_drive_file: upload a smaller file in one call.',
-              '29. start_google_drive_upload: begin a chunked upload session for a larger file.',
-              '30. append_google_drive_upload_chunk: append one chunk to an upload session.',
-              '31. finish_google_drive_upload: finalize a chunked upload into Drive.',
-              '32. abort_google_drive_upload: cancel a chunked upload and remove temp data.',
-              'When Google Sheets sync is enabled, writes and cancellations update the current MCP caller-specific Google Sheets file automatically.',
-              'Use list_shared_google_sheet_tabs and read_shared_google_sheet_cells when the user wants raw shared-sheet material instead of already-structured accounting records.',
+              '21. read_google_sheet_cells: read a specific tab and A1 range by workspaceId or Sheet URL, including post-sync verification.',
+              '22. write_google_sheet_cells: update a specific range or append rows by workspaceId or Sheet URL.',
+              '23. list_google_drive_files: inspect Google Drive files available to the current Google user.',
+              '24. read_google_drive_file: read a Google Docs or text-like Drive file.',
+              '25. update_google_drive_file: replace the content of a Google Docs or text-like Drive file.',
+              '26. move_google_drive_file: move a Drive file into a target folder.',
+              '27. create_google_drive_folder: create a Drive folder.',
+              '28. create_google_drive_text_file: only for Google Docs or text-like Drive files, not for PDFs, images, Office files, or archives.',
+              '29. upload_google_drive_file_auto: preferred unified upload entrypoint for PDFs, images, Office files, archives, and other non-text files; the server chooses the upload strategy automatically.',
+              '30. upload_google_drive_file: upload a smaller file in one call.',
+              '31. start_google_drive_upload: begin a chunked upload session for a larger file.',
+              '32. append_google_drive_upload_chunk: append one chunk to an upload session.',
+              '33. finish_google_drive_upload: finalize a chunked upload into Drive.',
+              '34. abort_google_drive_upload: cancel a chunked upload and remove temp data.',
+              'New sheets start with Accounting Records and Source Materials. The legacy Expenses tab is created only when add_expense is explicitly used.',
+              'upsert_accounting_record syncs Accounting Records automatically; use read_google_sheet_cells to verify actual cells when needed.',
+              'Use list_shared_google_sheet_tabs and read_google_sheet_cells when the user wants raw shared-sheet material instead of already-structured accounting records.',
               'Google Drive file access depends on the current Google OAuth token having sufficient Drive scopes.',
               'Confirm claimant, amount, expense date, and description before calling add_expense.',
             ].join('\n');

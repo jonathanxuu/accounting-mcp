@@ -122,8 +122,10 @@ Important behavior:
 
 - Workspace data still lives in PostgreSQL / Cloud SQL as the source of truth.
 - The shared sheet is a synchronized collaboration view for that workspace.
+- New shared sheets start with `Accounting Records` and `Source Materials`. The legacy `Expenses` tab is created only when the legacy `add_expense` flow is explicitly used.
 - Once a user has been added through `share_shared_google_sheet`, that user can access workspace data paths guarded by the same workspace membership.
 - `ingest_source_material` appends rows into the shared sheet's `Source Materials` tab when the case belongs to a workspace that already has a shared sheet.
+- `upsert_accounting_record` automatically inserts or updates one row in `Accounting Records`, keyed by `record_id`, after the database write succeeds.
 - `search_accounting_records`, `list_review_items`, and `run_saved_view` will sync to the workspace shared sheet when `workspaceId` is present and a shared sheet exists; otherwise they fall back to the caller's personal sheet.
 
 New collaboration tools:
@@ -133,18 +135,23 @@ New collaboration tools:
 - `get_shared_google_sheet`
 - `list_shared_google_sheet_tabs`
 - `read_shared_google_sheet_cells`
+- `read_google_sheet_cells`
+- `write_google_sheet_cells`
 
 Raw shared-sheet inspection behavior:
 
 - `share_shared_google_sheet` and `get_shared_google_sheet` can identify the target sheet by `workspaceId` or by the Google Sheets URL.
 - `list_shared_google_sheet_tabs` lets the agent discover available worksheet tabs such as `Source Materials`.
 - `read_shared_google_sheet_cells` lets the agent read raw worksheet ranges before those materials are converted into structured accounting records.
+- `read_google_sheet_cells` is the general read-and-verify entrypoint for a specific tab and A1 range.
+- `write_google_sheet_cells` updates a specific A1 range or appends rows and requires editor membership.
+- Direct cell edits change the Google Sheet only; structured accounting data should still be created or corrected with `upsert_accounting_record` so PostgreSQL remains the source of truth.
 
 For OAuth deployments, configure the MCP client to use Google OAuth directly. The MCP client sends the resulting Google access token as `Authorization: Bearer <token>` to this server. The server validates the token with Google, uses the Google user ID as the spreadsheet owner key, and uses the same access token to create or update that user's Sheets file.
 
 For API key deployments, the MCP caller is read from an HTTP header. By default, the server reads `X-Accounting-User`; override this with `ACCOUNTING_MCP_USER_HEADER`. The server requires a caller identity for all MCP tool calls so database records, summaries, cancellations, and Sheets files stay user-scoped.
 
-For example, with `GOOGLE_SHEETS_SHEET_NAME=Expenses` and `X-Accounting-User: alice@example.com`, the caller gets a spreadsheet file named `Expenses - alice@example.com`. If that user mapping does not exist yet, the service creates a new spreadsheet and stores the user-to-spreadsheet mapping in PostgreSQL. If a row with the same `expense_id` already exists in that user's file, the service updates that row instead of appending a duplicate.
+For example, with `X-Accounting-User: alice@example.com`, the caller gets a spreadsheet file named `Accounting - alice@example.com`. If that user mapping does not exist yet, the service creates a new spreadsheet and stores the user-to-spreadsheet mapping in PostgreSQL. `GOOGLE_SHEETS_SHEET_NAME` controls only the legacy expense worksheet name; that worksheet is created on demand when `add_expense` is used.
 
 Required settings:
 
@@ -155,7 +162,7 @@ GOOGLE_SHEETS_SHEET_NAME=Expenses
 GOOGLE_OAUTH_ALLOWED_DOMAINS=example.com
 ```
 
-`GOOGLE_SHEETS_SHEET_NAME` is used as the detail tab name inside each user spreadsheet and as the spreadsheet title prefix. `GOOGLE_SHEETS_SPREADSHEET_ID` is not required because spreadsheets are created per MCP caller.
+`GOOGLE_SHEETS_SHEET_NAME` is used only for the legacy expense detail tab. `GOOGLE_SHEETS_SPREADSHEET_ID` is not required because spreadsheets are created per MCP caller.
 
 For the OAuth fields in an MCP connector UI, use:
 

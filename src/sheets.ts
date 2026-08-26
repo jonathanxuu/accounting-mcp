@@ -43,6 +43,35 @@ type SheetsConfig = {
 
 type SpreadsheetTarget = Pick<UserSpreadsheetMapping, 'spreadsheetId' | 'spreadsheetUrl' | 'title'>;
 
+type AccountingRecord = {
+  id: number;
+  accountingCaseId: number;
+  recordFamily: string;
+  sourceMaterialIds: number[];
+  counterparty: string | null;
+  amount: number;
+  amountCents: number;
+  currency: string;
+  recordDate: string;
+  documentNo: string | null;
+  status: string;
+  description: string | null;
+  attributes: Record<string, unknown>;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AccountingCase = {
+  id: number;
+  workspaceId: string;
+  clientEntityId: string;
+  accountingPeriod: string;
+  serviceScope: string;
+  status: string;
+};
+
 export type WorksheetSyncResult = {
   spreadsheetId: string;
   spreadsheetUrl: string | null;
@@ -82,6 +111,15 @@ export type SharedSpreadsheetCellsResult = SharedSpreadsheetResult & {
   rowCount: number;
 };
 
+export type SharedSpreadsheetWriteResult = SharedSpreadsheetResult & {
+  worksheetName: string;
+  range: string;
+  mode: 'update' | 'append';
+  updatedRange: string | null;
+  updatedRows: number;
+  updatedCells: number;
+};
+
 const HEADER = [
   'expense_id',
   'claimant',
@@ -102,6 +140,8 @@ const HEADER = [
 ];
 
 const SOURCE_MATERIALS_SHEET_NAME = 'Source Materials';
+const ACCOUNTING_RECORDS_SHEET_NAME = 'Accounting Records';
+const SPREADSHEET_TITLE_PREFIX = 'Accounting';
 const SOURCE_MATERIALS_HEADER = [
   'source_material_id',
   'accounting_case_id',
@@ -115,6 +155,30 @@ const SOURCE_MATERIALS_HEADER = [
   'confidence',
   'evidence_refs',
   'raw_text_preview',
+  'created_at',
+  'updated_at',
+];
+const ACCOUNTING_RECORDS_HEADER = [
+  'record_id',
+  'accounting_case_id',
+  'workspace_id',
+  'client_entity_id',
+  'accounting_period',
+  'service_scope',
+  'case_status',
+  'record_family',
+  'source_material_ids',
+  'counterparty',
+  'amount',
+  'amount_cents',
+  'currency',
+  'record_date',
+  'document_no',
+  'status',
+  'description',
+  'attributes',
+  'created_by',
+  'updated_by',
   'created_at',
   'updated_at',
 ];
@@ -144,14 +208,14 @@ function buildDetailSheetName(sheetName: string): string {
 }
 
 function buildUserSpreadsheetTitle(baseSheetName: string, user: McpUserIdentity): string {
-  const baseTitle = sanitizeSheetTitle(baseSheetName) || 'Expenses';
+  const baseTitle = sanitizeSheetTitle(baseSheetName) || 'Accounting';
   const userTitle = sanitizeSheetTitle(user.label) || sanitizeSheetTitle(user.key) || 'Unknown';
   const title = `${baseTitle} - ${userTitle}`;
   const hashSuffix = userTitle === user.label.trim() ? '' : `-${identityHash(user.key)}`;
 
   return (
     truncateTitle(`${title}${hashSuffix}`, MAX_SPREADSHEET_TITLE_LENGTH) ||
-    `Expenses - ${identityHash(user.key)}`
+    `Accounting - ${identityHash(user.key)}`
   );
 }
 
@@ -160,11 +224,11 @@ function buildSharedSpreadsheetTitle(
   workspaceId: string,
   explicitTitle?: string,
 ): string {
-  const baseTitle = sanitizeSheetTitle(explicitTitle || baseSheetName) || 'Expenses';
+  const baseTitle = sanitizeSheetTitle(explicitTitle || baseSheetName) || 'Accounting';
   const workspaceTitle = sanitizeSheetTitle(workspaceId) || identityHash(workspaceId);
   return (
     truncateTitle(`${baseTitle} - Shared - ${workspaceTitle}`, MAX_SPREADSHEET_TITLE_LENGTH) ||
-    `Expenses - Shared - ${identityHash(workspaceId)}`
+    `Accounting - Shared - ${identityHash(workspaceId)}`
   );
 }
 
@@ -232,6 +296,33 @@ function toSheetValuesRow(values: unknown[]): string[] {
 
     return String(value);
   });
+}
+
+function toAccountingRecordRow(record: AccountingRecord, accountingCase: AccountingCase): string[] {
+  return toSheetValuesRow([
+    record.id,
+    record.accountingCaseId,
+    accountingCase.workspaceId,
+    accountingCase.clientEntityId,
+    accountingCase.accountingPeriod,
+    accountingCase.serviceScope,
+    accountingCase.status,
+    record.recordFamily,
+    record.sourceMaterialIds,
+    record.counterparty,
+    record.amount,
+    record.amountCents,
+    record.currency,
+    record.recordDate,
+    record.documentNo,
+    record.status,
+    record.description,
+    record.attributes,
+    record.createdBy,
+    record.updatedBy,
+    record.createdAt,
+    record.updatedAt,
+  ]);
 }
 
 export class GoogleSheetsSync {
@@ -537,7 +628,6 @@ export class GoogleSheetsSync {
       SOURCE_MATERIALS_SHEET_NAME,
       SOURCE_MATERIALS_HEADER,
     );
-
     await sheets.spreadsheets.values.append({
       spreadsheetId: spreadsheet.spreadsheetId,
       range: a1Range(SOURCE_MATERIALS_SHEET_NAME, 'A:N'),
@@ -575,6 +665,71 @@ export class GoogleSheetsSync {
     };
   }
 
+  async syncAccountingRecord(
+    user: McpUserIdentity,
+    record: AccountingRecord,
+    accountingCase: AccountingCase,
+  ): Promise<WorksheetSyncResult> {
+    if (!this.enabled) {
+      throw new Error('Google Sheets sync is not enabled');
+    }
+
+    const sheets = await this.getSheetsApi(user);
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const spreadsheet = await this.resolveSpreadsheetTarget(
+      sheets,
+      user,
+      accountingCase.workspaceId,
+    );
+    await this.ensureNamedSheet(sheets, spreadsheet.spreadsheetId, ACCOUNTING_RECORDS_SHEET_NAME);
+    await this.ensureHeader(
+      sheets,
+      spreadsheet.spreadsheetId,
+      ACCOUNTING_RECORDS_SHEET_NAME,
+      ACCOUNTING_RECORDS_HEADER,
+    );
+
+    const existing = await sheets.spreadsheets.values.get({
+      spreadsheetId: spreadsheet.spreadsheetId,
+      range: a1Range(ACCOUNTING_RECORDS_SHEET_NAME, 'A:V'),
+    });
+    const rows = existing.data.values ?? [];
+    const targetRowIndex = rows.findIndex(
+      (row: string[], index: number) => index > 0 && row[0] === String(record.id),
+    );
+    const values = [toAccountingRecordRow(record, accountingCase)];
+
+    if (targetRowIndex >= 0) {
+      const rowNumber = targetRowIndex + 1;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: spreadsheet.spreadsheetId,
+        range: a1Range(ACCOUNTING_RECORDS_SHEET_NAME, `A${rowNumber}:V${rowNumber}`),
+        valueInputOption: 'RAW',
+        requestBody: { values },
+      });
+    } else {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: spreadsheet.spreadsheetId,
+        range: a1Range(ACCOUNTING_RECORDS_SHEET_NAME, 'A:V'),
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values },
+      });
+    }
+
+    return {
+      spreadsheetId: spreadsheet.spreadsheetId,
+      spreadsheetUrl: spreadsheet.spreadsheetUrl,
+      worksheetName: ACCOUNTING_RECORDS_SHEET_NAME,
+      rowCount: 1,
+      workspaceId: spreadsheet.workspaceId,
+      syncMode: spreadsheet.syncMode,
+    };
+  }
+
   async createSharedSpreadsheet(
     user: McpUserIdentity,
     input: {
@@ -597,6 +752,21 @@ export class GoogleSheetsSync {
       user,
       () => this.createWorkspaceSpreadsheet(sheets, user, input.workspaceId, input.title),
     );
+    await this.ensureNamedSheet(sheets, spreadsheet.spreadsheetId, ACCOUNTING_RECORDS_SHEET_NAME);
+    await this.ensureHeader(
+      sheets,
+      spreadsheet.spreadsheetId,
+      ACCOUNTING_RECORDS_SHEET_NAME,
+      ACCOUNTING_RECORDS_HEADER,
+    );
+    await this.ensureNamedSheet(sheets, spreadsheet.spreadsheetId, SOURCE_MATERIALS_SHEET_NAME);
+    await this.ensureHeader(
+      sheets,
+      spreadsheet.spreadsheetId,
+      SOURCE_MATERIALS_SHEET_NAME,
+      SOURCE_MATERIALS_HEADER,
+    );
+    await this.removeEmptyLegacyExpenseSheet(sheets, spreadsheet.spreadsheetId);
 
     for (const email of input.memberEmails ?? []) {
       const normalizedEmail = identityEmail(email);
@@ -748,6 +918,75 @@ export class GoogleSheetsSync {
     };
   }
 
+  async writeSharedSpreadsheetCells(
+    user: McpUserIdentity,
+    input: {
+      workspaceId?: string;
+      spreadsheetUrl?: string;
+      worksheetName: string;
+      range: string;
+      values: Array<Array<string | number | boolean | null>>;
+      mode: 'update' | 'append';
+      valueInputOption: 'RAW' | 'USER_ENTERED';
+    },
+  ): Promise<SharedSpreadsheetWriteResult> {
+    const access = await this.requireSharedSpreadsheetAccessByLocator(input, user, 'editor');
+    const sheets = await this.getSheetsApi(user);
+
+    if (!sheets) {
+      throw new Error('Google Sheets API is not available');
+    }
+
+    const worksheetName = buildDetailSheetName(input.worksheetName);
+    const range = input.range.trim();
+    await this.ensureNamedSheet(sheets, access.spreadsheetId, worksheetName);
+
+    let updatedRange: string | null = null;
+    let updatedRows = 0;
+    let updatedCells = 0;
+
+    if (input.mode === 'append') {
+      const result = await sheets.spreadsheets.values.append({
+        spreadsheetId: access.spreadsheetId,
+        range: a1Range(worksheetName, range),
+        valueInputOption: input.valueInputOption,
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: input.values },
+      });
+      updatedRange = result.data.updates?.updatedRange ?? null;
+      updatedRows = result.data.updates?.updatedRows ?? input.values.length;
+      updatedCells =
+        result.data.updates?.updatedCells ?? input.values.reduce((sum, row) => sum + row.length, 0);
+    } else {
+      const result = await sheets.spreadsheets.values.update({
+        spreadsheetId: access.spreadsheetId,
+        range: a1Range(worksheetName, range),
+        valueInputOption: input.valueInputOption,
+        requestBody: { values: input.values },
+      });
+      updatedRange = result.data.updatedRange ?? null;
+      updatedRows = result.data.updatedRows ?? input.values.length;
+      updatedCells =
+        result.data.updatedCells ?? input.values.reduce((sum, row) => sum + row.length, 0);
+    }
+
+    return {
+      workspaceId: access.workspaceId,
+      spreadsheetId: access.spreadsheetId,
+      spreadsheetUrl: access.spreadsheetUrl,
+      title: access.title,
+      ownerUserKey: access.ownerUserKey,
+      ownerUserLabel: access.ownerUserLabel,
+      members: await this.spreadsheetRepository.listSharedSpreadsheetMembers(access.workspaceId),
+      worksheetName,
+      range,
+      mode: input.mode,
+      updatedRange,
+      updatedRows,
+      updatedCells,
+    };
+  }
+
   private async ensureDrivePermission(
     drive: drive_v3.Drive,
     fileId: string,
@@ -775,7 +1014,7 @@ export class GoogleSheetsSync {
     sheets: sheets_v4.Sheets,
     user: McpUserIdentity,
   ): Promise<NewUserSpreadsheet> {
-    const title = buildUserSpreadsheetTitle(this.sheetName, user);
+    const title = buildUserSpreadsheetTitle(SPREADSHEET_TITLE_PREFIX, user);
     const created = await sheets.spreadsheets.create({
       requestBody: {
         properties: {
@@ -784,7 +1023,12 @@ export class GoogleSheetsSync {
         sheets: [
           {
             properties: {
-              title: this.sheetName,
+              title: ACCOUNTING_RECORDS_SHEET_NAME,
+            },
+          },
+          {
+            properties: {
+              title: SOURCE_MATERIALS_SHEET_NAME,
             },
           },
         ],
@@ -810,7 +1054,11 @@ export class GoogleSheetsSync {
     workspaceId: string,
     explicitTitle?: string,
   ): Promise<NewSharedSpreadsheet> {
-    const title = buildSharedSpreadsheetTitle(this.sheetName, workspaceId, explicitTitle);
+    const title = buildSharedSpreadsheetTitle(
+      SPREADSHEET_TITLE_PREFIX,
+      workspaceId,
+      explicitTitle,
+    );
     const created = await sheets.spreadsheets.create({
       requestBody: {
         properties: {
@@ -819,7 +1067,7 @@ export class GoogleSheetsSync {
         sheets: [
           {
             properties: {
-              title: this.sheetName,
+              title: ACCOUNTING_RECORDS_SHEET_NAME,
             },
           },
           {
@@ -848,6 +1096,55 @@ export class GoogleSheetsSync {
 
   private async ensureDetailSheet(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<void> {
     await this.ensureNamedSheet(sheets, spreadsheetId, this.sheetName);
+  }
+
+  private async removeEmptyLegacyExpenseSheet(
+    sheets: sheets_v4.Sheets,
+    spreadsheetId: string,
+  ): Promise<void> {
+    if (
+      this.sheetName === ACCOUNTING_RECORDS_SHEET_NAME ||
+      this.sheetName === SOURCE_MATERIALS_SHEET_NAME
+    ) {
+      return;
+    }
+
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets(properties(sheetId,title))',
+    });
+    const legacySheet = spreadsheet.data.sheets?.find(
+      (sheet) => sheet.properties?.title === this.sheetName,
+    );
+    const sheetId = legacySheet?.properties?.sheetId;
+    if (sheetId === undefined || sheetId === null) {
+      return;
+    }
+
+    const values = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: a1Range(this.sheetName, 'A:ZZ'),
+    });
+    const hasContent = (values.data.values ?? []).some((row) =>
+      row.some((cell) => String(cell ?? '').trim() !== ''),
+    );
+    if (hasContent) {
+      return;
+    }
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            deleteSheet: {
+              sheetId,
+            },
+          },
+        ],
+      },
+    });
+    this.knownDetailSheets.delete(`${spreadsheetId}:${this.sheetName}`);
   }
 
   private async ensureNamedSheet(

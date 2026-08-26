@@ -87,6 +87,7 @@ export function loadConfig(): AppConfig {
     sheets: {
       enabled: sheetsEnabled,
       useUserGoogleAuth: authMode === 'google_oauth',
+      // This setting now controls only the legacy add_expense worksheet, which is created on demand.
       sheetName: process.env.GOOGLE_SHEETS_SHEET_NAME?.trim() || 'Expenses',
       serviceAccountKeyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE?.trim(),
       serviceAccountKeyJson: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_JSON?.trim(),
